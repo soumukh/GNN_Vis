@@ -1,0 +1,14 @@
+dash
+dash-cytoscape
+Flask
+torch
+torch-geometric
+networkx
+numpy
+requests
+pandas
+plotly
+scikit-learn
+pynvml
+cugraph
+dash-extensions
