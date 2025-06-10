@@ -1,243 +1,320 @@
-# train_models.py (Fixed and Optimized)
-import os
-import pickle
+# -*- coding: utf-8 -*-
+"""
+train_models.py
+
+This script trains GCN and GAT models on specified datasets (Cora, CiteSeer, AmazonPhoto)
+and saves the trained model state_dict and initialization arguments to .pkl files
+in the 'models/' directory. These saved models can then be loaded by the Dash application.
+
+Run this script after 'preprocess_datasets.py' for faster dataset loading.
+"""
 import torch
 import torch.nn.functional as F
-from torch.optim import Adam, lr_scheduler
-import numpy as np
-import copy
-from tqdm import tqdm
-import logging
-from logging.handlers import RotatingFileHandler
-
-# PyTorch Geometric imports
-from torch_geometric.datasets import Planetoid
+import torch.optim as optim
+from torch_geometric.datasets import Planetoid, Amazon
 from torch_geometric.nn import GCNConv, GATConv
 from torch_geometric.data import Data
-from node2vec import Node2Vec
-import networkx as nx
+from torch_geometric.transforms import RandomNodeSplit # For creating splits for Amazon dataset
+import os
+import pickle
+import time
+import numpy as np
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        RotatingFileHandler('/home/sougatam/visualization/optimize/training.log', maxBytes=1e6, backupCount=3),
-        logging.StreamHandler()
-    ]
-)
+# --- Configuration ---
+MODEL_DIR = 'models'  # Directory to save trained models
+DATA_DIR = 'data'     # Root directory for raw datasets
+PROCESSED_DATA_DIR = os.path.join(DATA_DIR, 'processed') # Subdirectory for pre-processed .pt files
 
-# Configuration
-CONFIG = {
-    'MODEL_DIR': 'models',
-    'DATA_DIR': 'data',
-    'EPOCHS': 300,
-    'LEARNING_RATE': 0.005,
-    'WEIGHT_DECAY': 1e-4,
-    'HIDDEN_CHANNELS_GCN': 64,
-    'HIDDEN_CHANNELS_GAT': 32,
-    'GAT_HEADS': 8,
-    'PATIENCE': 15,
-    'BATCH_SIZE': 4096,
-    'NODE2VEC_PARAMS': {
-        'dimensions': 32,
-        'walk_length': 10,
-        'num_walks': 50,
-        'workers': 8,
-        'quiet': True
-    },
-    'DATASETS': ['Cora', 'CiteSeer', 'PubMed', 'Jazz'],
-    'MODELS': ['GCN', 'GAT']
-}
+# Datasets and models to train
+# Ensure these dataset names match those used in preprocess_datasets.py and app.py
+DATASETS_TO_TRAIN = ['Cora', 'CiteSeer', 'AmazonPhoto'] # Updated to AmazonPhoto
+MODELS_TO_TRAIN = ['GCN', 'GAT'] 
 
-# Device configuration
-DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-NUM_GPUS = torch.cuda.device_count()
-torch.backends.cudnn.benchmark = True
+# Training Hyperparameters (can be adjusted)
+LEARNING_RATE = 0.005 
+WEIGHT_DECAY = 5e-4
+EPOCHS = 300 
+EARLY_STOPPING_PATIENCE = 20 
 
+# Model-specific Hyperparameters (kept from previous AmazonComputers attempt, suitable for AmazonPhoto)
+GCN_HIDDEN_CHANNELS = 64 
+GAT_HIDDEN_CHANNELS = 32 
+GAT_HEADS = 8
+GAT_OUTPUT_HEADS = 1 
+
+# --- GPU Setup ---
+if torch.cuda.is_available():
+    device = torch.device('cuda:0')
+    print(f"CUDA is available. Training on GPU: {torch.cuda.get_device_name(device)}")
+else:
+    device = torch.device('cpu')
+    print("CUDA not available. Training on CPU.")
+
+script_dir = os.path.dirname(__file__) if '__file__' in locals() else '.'
+model_abs_dir = os.path.join(script_dir, MODEL_DIR)
+data_abs_dir = os.path.join(script_dir, DATA_DIR)
+processed_data_abs_dir = os.path.join(script_dir, PROCESSED_DATA_DIR)
+
+os.makedirs(model_abs_dir, exist_ok=True)
+os.makedirs(data_abs_dir, exist_ok=True)
+os.makedirs(processed_data_abs_dir, exist_ok=True)
+
+
+# --- Model Definitions (Should match app.py) ---
 class GCNNet(torch.nn.Module):
     def __init__(self, in_channels, hidden_channels, out_channels):
         super().__init__()
         self.conv1 = GCNConv(in_channels, hidden_channels)
         self.conv2 = GCNConv(hidden_channels, out_channels)
-        self.init_args = {'hidden_channels': hidden_channels}
+        self.init_args = {'hidden_channels': hidden_channels} 
 
-    def forward(self, data):
-        x, edge_index = data.x, data.edge_index
-        x = self.conv1(x, edge_index).relu()
-        embeddings = x
+    def forward(self, x, edge_index):
+        x = self.conv1(x, edge_index)
+        x = F.relu(x)
+        x = F.dropout(x, p=0.5, training=self.training) 
         x = self.conv2(x, edge_index)
-        return F.log_softmax(x, dim=1), embeddings
+        return F.log_softmax(x, dim=1)
 
 class GATNet(torch.nn.Module):
-    def __init__(self, in_channels, hidden_channels, out_channels, heads=8):
+    def __init__(self, in_channels, hidden_channels, out_channels, heads=8, output_heads=1):
         super().__init__()
-        self.conv1 = GATConv(in_channels, hidden_channels, heads=heads, dropout=0.3)
-        self.conv2 = GATConv(hidden_channels*heads, out_channels, heads=1, concat=False, dropout=0.3)
-        self.init_args = {'hidden_channels': hidden_channels, 'heads': heads}
+        self.conv1 = GATConv(in_channels, hidden_channels, heads=heads, dropout=0.6)
+        self.conv2 = GATConv(hidden_channels * heads, out_channels, heads=output_heads, concat=False, dropout=0.6)
+        self.init_args = {'hidden_channels': hidden_channels, 'heads': heads} 
 
-    def forward(self, data):
-        x, edge_index = data.x, data.edge_index
+    def forward(self, x, edge_index):
+        x = F.dropout(x, p=0.6, training=self.training) 
         x = self.conv1(x, edge_index)
         x = F.elu(x)
-        embeddings = x
+        x = F.dropout(x, p=0.6, training=self.training) 
         x = self.conv2(x, edge_index)
-        return F.log_softmax(x, dim=1), embeddings
+        return F.log_softmax(x, dim=1)
 
-class JazzDataset:
-    def __init__(self):
-        self._load_data()
-        
-    def _load_data(self):
-        data_path = os.path.join(CONFIG['/home/sougatam/jazz'], 'Jazz')
-        os.makedirs(data_path, exist_ok=True)
-        
-        edge_file = os.path.join(data_path, 'jazz.cites')
-        feature_file = os.path.join(data_path, 'jazz.content')
-        
-            
-        edges = np.loadtxt(edge_file, dtype=int, delimiter='\t')
-        content = np.loadtxt(feature_file, dtype=float)
-        
-        # Node2Vec embeddings
-        G = nx.from_edgelist(edges)
-        node2vec = Node2Vec(G, **CONFIG['NODE2VEC_PARAMS'])
-        model = node2vec.fit(window=10, min_count=1, batch_words=4)
-        embeddings = np.array([model.wv[str(n)] for n in sorted(G.nodes())])
-        
-        features = np.hstack((content[:, 1:-1], embeddings))
-        
-        self.data = Data(
-            x=torch.tensor(features, dtype=torch.float),
-            edge_index=torch.tensor(edges.T, dtype=torch.long),
-            y=torch.tensor(content[:, -1].astype(int), dtype=torch.long)
-        )
-        
-        num_nodes = self.data.num_nodes
-        perm = torch.randperm(num_nodes)
-        self.data.train_mask = torch.zeros(num_nodes, dtype=torch.bool)
-        self.data.val_mask = torch.zeros(num_nodes, dtype=torch.bool)
-        self.data.test_mask = torch.zeros(num_nodes, dtype=torch.bool)
-        
-        split = [0.8, 0.1, 0.1]
-        sections = [int(num_nodes*split[0]), int(num_nodes*(split[0]+split[1]))]
-        self.data.train_mask[perm[:sections[0]]] = True
-        self.data.val_mask[perm[sections[0]:sections[1]]] = True
-        self.data.test_mask[perm[sections[1]:]] = True
+# --- Dataset Wrapper for loading preprocessed data ---
+class PreprocessedDatasetWrapper:
+    def __init__(self, loaded_obj):
+        self.data = loaded_obj['data']
+        self.num_node_features = loaded_obj['num_node_features']
+        self.num_classes = loaded_obj['num_classes']
+        self.name = loaded_obj.get('name', 'Unknown Preprocessed')
+
+    def __getitem__(self, idx):
+        if idx == 0: return self.data
+        raise IndexError(f"{self.name} index out of range")
+    def __len__(self): return 1
 
 
-class Trainer:
-    def __init__(self, model, data):
-        if NUM_GPUS > 1:
-            self.model = torch.nn.DataParallel(model).to(DEVICE)
-        else:
-            self.model = model.to(DEVICE)
-            
-        self.data = data.to(DEVICE)
-        self.optimizer = Adam(self.model.parameters(), 
-                            lr=CONFIG['LEARNING_RATE'], 
-                            weight_decay=CONFIG['WEIGHT_DECAY'])
-        self.scheduler = lr_scheduler.ReduceLROnPlateau(self.optimizer, 'max', 
-                                                      patience=CONFIG['PATIENCE']//2)
-        self.best_weights = None
+# --- Dataset Loading Function ---
+def load_training_dataset(name, root_dir, processed_dir):
+    """
+    Loads a dataset for training. Checks for pre-processed .pt file first.
+    For AmazonPhoto, it will create random splits if not present in the loaded Data object.
+    """
+    print(f"  Attempting to load dataset '{name}' for training...")
+    dataset_loader_obj = None 
 
-    def train_epoch(self):
-        self.model.train()
-        self.optimizer.zero_grad()
-        out, _ = self.model(self.data)
-        loss = F.nll_loss(out[self.data.train_mask], 
-                        self.data.y[self.data.train_mask])
-        loss.backward()
-        self.optimizer.step()
-        return loss.item()
-
-    @torch.no_grad()
-    def evaluate(self, mask):
-        self.model.eval()
-        out, _ = self.model(self.data)
-        pred = out[mask].argmax(dim=1)
-        return (pred == self.data.y[mask]).float().mean().item()
-
-    def run(self):
-        best_acc = 0
-        no_improve = 0
-        progress = tqdm(range(CONFIG['EPOCHS']), desc="Training")
-        
-        for epoch in progress:
-            loss = self.train_epoch()
-            train_acc = self.evaluate(self.data.train_mask)
-            val_acc = self.evaluate(self.data.val_mask)
-            self.scheduler.step(val_acc)
-            
-            progress.set_postfix_str(
-                f"Loss: {loss:.4f}, Train: {train_acc:.4f}, Val: {val_acc:.4f}"
-            )
-            
-            if val_acc > best_acc:
-                best_acc = val_acc
-                no_improve = 0
-                self.best_weights = copy.deepcopy(self.model.state_dict())
+    processed_file_path = os.path.join(processed_dir, f"{name}_processed.pt")
+    data_loaded_from_pt = False
+    if os.path.exists(processed_file_path):
+        try:
+            print(f"    Found pre-processed file. Loading '{name}' from .pt ...")
+            loaded_obj = torch.load(processed_file_path, map_location=torch.device('cpu'), weights_only=False)
+            if isinstance(loaded_obj, dict) and all(k in loaded_obj for k in ['data', 'num_node_features', 'num_classes']):
+                dataset_loader_obj = PreprocessedDatasetWrapper(loaded_obj)
+                data_loaded_from_pt = True
+                print(f"    Dataset '{name}' loaded successfully from pre-processed file.")
             else:
-                no_improve += 1
-                if no_improve >= CONFIG['PATIENCE']:
-                    logging.info(f"Early stopping at epoch {epoch}")
-                    break
-
-        self.model.load_state_dict(self.best_weights)
-        test_acc = self.evaluate(self.data.test_mask)
-        return test_acc
-
-def train_model(model_type, dataset_name):
-    logging.info(f"\n{'='*40}\nTraining {model_type} on {dataset_name}\n{'='*40}")
+                print(f"    Warning: Pre-processed file '{processed_file_path}' has unexpected format. Falling back.")
+        except Exception as e:
+            print(f"    Warning: Error loading pre-processed file '{processed_file_path}': {e}. Falling back.")
     
-    try:
-        if dataset_name == 'Jazz':
-            dataset = JazzDataset().data
-        else:
-            dataset = Planetoid(root=os.path.join(CONFIG['DATA_DIR'], dataset_name), 
-                              name=dataset_name)[0]
+    if dataset_loader_obj is None: 
+        try:
+            if name in ['Cora', 'CiteSeer']:
+                print(f"    Loading '{name}' using Planetoid (root: {root_dir})...")
+                original_loader = Planetoid(root=root_dir, name=name)
+            elif name == 'AmazonPhoto': # Changed from AmazonComputers
+                print(f"    Loading '{name}' using Amazon Photo loader (root: {root_dir})...")
+                original_loader = Amazon(root=root_dir, name='Photo') # Changed to 'Photo'
+            elif name == 'AmazonComputers': # Kept for reference if user wants to switch back easily
+                print(f"    Loading '{name}' using Amazon Computers loader (root: {root_dir})...")
+                original_loader = Amazon(root=root_dir, name='Computers')
+            else:
+                print(f"    Dataset '{name}' not recognized by standard loader in training script.")
+                return None
             
-        in_channels = dataset.num_node_features
-        out_channels = len(torch.unique(dataset.y))
-        
-        if model_type == 'GCN':
-            model = GCNNet(in_channels, CONFIG['HIDDEN_CHANNELS_GCN'], out_channels)
-        elif model_type == 'GAT':
-            model = GATNet(in_channels, CONFIG['HIDDEN_CHANNELS_GAT'], out_channels, 
-                         CONFIG['GAT_HEADS'])
-        
-        trainer = Trainer(model, dataset)
-        test_acc = trainer.run()
-        
-        os.makedirs(CONFIG['MODEL_DIR'], exist_ok=True)
-        model_path = f"{CONFIG['MODEL_DIR']}/{model_type}_{dataset_name}.pkl"
-        
-        model_to_save = model.module if isinstance(model, torch.nn.DataParallel) else model
-        state = {
-            'state_dict': model_to_save.state_dict(),
-            'init_args': model_to_save.init_args,
-            'test_acc': test_acc
-        }
-        
-        with open(model_path, 'wb') as f:
-            pickle.dump(state, f, protocol=pickle.HIGHEST_PROTOCOL)
+            data_obj_raw = original_loader[0]
+            dataset_loader_obj = PreprocessedDatasetWrapper({
+                'data': data_obj_raw,
+                'num_node_features': original_loader.num_node_features,
+                'num_classes': original_loader.num_classes,
+                'name': name
+            })
+            print(f"    Dataset '{name}' loaded successfully (standard method).")
+        except Exception as e:
+            print(f"    Error loading dataset {name} using standard method: {e}")
+            import traceback; traceback.print_exc()
+            return None
+    
+    # Create splits for Amazon datasets if they don't exist
+    if name in ['AmazonPhoto', 'AmazonComputers']: # Apply to both Amazon datasets
+        data = dataset_loader_obj.data
+        if not (hasattr(data, 'train_mask') and hasattr(data, 'val_mask') and hasattr(data, 'test_mask') and \
+                data.train_mask is not None and data.val_mask is not None and data.test_mask is not None and \
+                data.train_mask.sum() > 0) : 
             
-        logging.info(f"Model saved to {model_path} | Test Accuracy: {test_acc:.4f}")
-        
-    except Exception as e:
-        logging.error(f"Training failed: {str(e)}", exc_info=True)
+            print(f"    '{name}' dataset does not have predefined splits. Creating random splits...")
+            if dataset_loader_obj.num_classes > 0:
+                # Using percentages for train/val/test splits
+                # For AmazonPhoto (~7.6k nodes):
+                # Train: ~2.5% (approx 190 nodes)
+                # Val:   ~4%   (approx 300 nodes)
+                # Test:  Remaining
+                # These are still relatively small for demonstration purposes.
+                num_train_nodes = int(data.num_nodes * 0.025) 
+                num_val_nodes = int(data.num_nodes * 0.04)   
+                num_test_nodes = data.num_nodes - num_train_nodes - num_val_nodes
 
+                if num_train_nodes > 0 and num_val_nodes > 0 and num_test_nodes > 0:
+                    # Using RandomNodeSplit to create train, val, and test masks
+                    # It ensures that num_val and num_test are met, and the rest go to train.
+                    # However, to be more explicit about train size first:
+                    # We might need to adjust if we want a very specific train count first.
+                    # Let's use num_val and num_test, and the rest will be train.
+                    # This means train will be data.num_nodes - num_val_nodes - num_test_nodes
+                    transform = RandomNodeSplit(split='train_rest', num_val=num_val_nodes, num_test=num_test_nodes)
+                    
+                    dataset_loader_obj.data = transform(dataset_loader_obj.data) 
+                    print(f"    Created splits for '{name}': Train={dataset_loader_obj.data.train_mask.sum().item()}, Val={dataset_loader_obj.data.val_mask.sum().item()}, Test={dataset_loader_obj.data.test_mask.sum().item()}")
+                else:
+                    print(f"    Could not create valid splits for {name} with current settings (num_nodes={data.num_nodes}, train_ratio=0.025, val_ratio=0.04). Dataset might be too small or ratios too low.")
+                    return None 
+            else:
+                print(f"    Cannot create class-aware splits for {name} as num_classes is 0 or unknown.")
+                return None
+        elif data_loaded_from_pt: 
+             print(f"    '{name}' loaded from .pt already has splits (or this check was passed).")
+
+    return dataset_loader_obj
+
+
+# --- Training and Evaluation Functions ---
+def train_one_epoch(model, data, optimizer, criterion):
+    model.train()
+    optimizer.zero_grad()
+    out = model(data.x, data.edge_index)
+    train_mask = data.train_mask.to(device, dtype=torch.bool)
+    loss = criterion(out[train_mask], data.y[train_mask])
+    loss.backward()
+    optimizer.step()
+    return loss.item()
+
+@torch.no_grad()
+def evaluate(model, data, mask):
+    model.eval()
+    out = model(data.x, data.edge_index)
+    eval_mask = mask.to(device, dtype=torch.bool)
+    if eval_mask.sum() == 0: # Avoid division by zero if mask is empty
+        return 0.0
+    pred = out[eval_mask].argmax(dim=1)
+    correct = (pred == data.y[eval_mask]).sum()
+    acc = int(correct) / int(eval_mask.sum()) 
+    return acc
+
+# --- Main Training Loop ---
 if __name__ == '__main__':
-    logging.info(f"Using {NUM_GPUS} Tesla T4 GPUs")
-    
-    # Create required directories
-    os.makedirs(CONFIG['DATA_DIR'], exist_ok=True)
-    os.makedirs(CONFIG['MODEL_DIR'], exist_ok=True)
-    
-    for dataset in CONFIG['DATASETS']:
-        for model_type in CONFIG['MODELS']:
-            try:
-                train_model(model_type, dataset)
-            except Exception as e:
-                logging.error(f"Failed {model_type} on {dataset}: {str(e)}")
+    print("--- Starting Model Training Script ---")
+
+    for dataset_name in DATASETS_TO_TRAIN:
+        print(f"\n--- Training for Dataset: {dataset_name} ---")
+        
+        dataset = load_training_dataset(dataset_name, root_dir=data_abs_dir, processed_dir=processed_data_abs_dir)
+        if dataset is None or dataset.data is None: 
+            print(f"Skipping {dataset_name} due to loading error or empty data.")
+            continue
+        
+        data = dataset.data.to(device) 
+        num_features = dataset.num_node_features
+        num_classes = dataset.num_classes
+
+        if not (hasattr(data, 'train_mask') and hasattr(data, 'val_mask') and hasattr(data, 'test_mask') and \
+                data.train_mask is not None and data.val_mask is not None and data.test_mask is not None and \
+                data.train_mask.sum() > 0 and data.val_mask.sum() > 0): 
+            print(f"  *** ERROR: Dataset '{dataset_name}' is missing valid train/validation masks after loading/splitting. Skipping.")
+            continue
+
+        print(f"  Dataset '{dataset_name}' on {device}. Nodes: {data.num_nodes}, Features: {num_features}, Classes: {num_classes}")
+        print(f"  Train samples: {data.train_mask.sum().item()}, Val samples: {data.val_mask.sum().item()}, Test samples: {data.test_mask.sum().item()}")
+
+
+        for model_type in MODELS_TO_TRAIN:
+            print(f"\n  -- Training Model Type: {model_type} --")
+            start_time_model_train = time.time()
+            model = None
+            model_init_args = {}
+
+            if model_type == 'GCN':
+                model_init_args = {'hidden_channels': GCN_HIDDEN_CHANNELS}
+                model = GCNNet(num_features, GCN_HIDDEN_CHANNELS, num_classes)
+            elif model_type == 'GAT':
+                model_init_args = {'hidden_channels': GAT_HIDDEN_CHANNELS, 'heads': GAT_HEADS}
+                model = GATNet(num_features, GAT_HIDDEN_CHANNELS, num_classes, heads=GAT_HEADS, output_heads=GAT_OUTPUT_HEADS)
+            
+            if model is None:
+                print(f"    Unknown model type: {model_type}. Skipping.")
                 continue
+            
+            model = model.to(device)
+            optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+            criterion = torch.nn.NLLLoss() 
+
+            best_val_acc = 0
+            epochs_no_improve = 0
+            best_model_state = None
+
+            for epoch in range(1, EPOCHS + 1):
+                train_loss = train_one_epoch(model, data, optimizer, criterion)
+                val_acc = evaluate(model, data, data.val_mask)
+                
+                if epoch % 10 == 0 or epoch == 1: 
+                    print(f"    Epoch: {epoch:03d}, Train Loss: {train_loss:.4f}, Val Acc: {val_acc:.4f}")
+
+                if val_acc > best_val_acc:
+                    best_val_acc = val_acc
+                    epochs_no_improve = 0
+                    best_model_state = model.state_dict().copy() 
+                else:
+                    epochs_no_improve += 1
+
+                if epochs_no_improve >= EARLY_STOPPING_PATIENCE:
+                    print(f"    Early stopping triggered at epoch {epoch} due to no improvement in validation accuracy for {EARLY_STOPPING_PATIENCE} epochs.")
+                    break
+            
+            print(f"  Training finished for {model_type} on {dataset_name}.")
+            
+            if best_model_state:
+                model.load_state_dict(best_model_state)
+                print(f"    Loaded best model state with Val Acc: {best_val_acc:.4f}")
+            else:
+                print("    Warning: No best model state found. Using last state.")
+
+            test_acc = evaluate(model, data, data.test_mask)
+            print(f"    Final Test Accuracy for {model_type} on {dataset_name}: {test_acc:.4f}")
+
+            model_filename = f"{model_type}_{dataset_name}.pkl"
+            model_save_path = os.path.join(model_abs_dir, model_filename)
+            
+            model.to('cpu') 
+            save_package = (model.state_dict(), model.init_args) 
+
+            try:
+                with open(model_save_path, 'wb') as f:
+                    pickle.dump(save_package, f)
+                print(f"    Model saved to: {model_save_path}")
+            except Exception as e:
+                print(f"    Error saving model {model_save_path}: {e}")
+
+            end_time_model_train = time.time()
+            print(f"    Total training and saving time for {model_type} on {dataset_name}: {end_time_model_train - start_time_model_train:.2f} seconds.")
+
+    print("\n--- Model Training Script Finished ---")
