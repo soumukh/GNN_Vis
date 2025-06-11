@@ -14,15 +14,6 @@ from torch_geometric.explain import Explainer, GNNExplainer
 from torch_geometric.data import Data
 from torch_geometric.utils import to_networkx, from_networkx, remove_self_loops, add_self_loops, k_hop_subgraph
 
-try:
-    from node2vec import Node2Vec
-except ImportError:
-    print("Node2Vec library not found for app. Please install it: pip install node2vec")
-    # Optionally exit or handle the absence of node2vec gracefully
-    # import sys
-    # sys.exit(1) # Example: exit if node2vec is essential for all datasets
-
-
 import networkx as nx
 import pandas as pd
 from sklearn.manifold import TSNE
@@ -35,14 +26,14 @@ import copy # For deep copying model state
 import warnings
 
 warnings.filterwarnings("ignore", category=UserWarning) # Suppress some warnings
-# warnings.simplefilter(action='ignore', category=FutureWarning)
 
 # --- Global Variables / Setup ---
 MODEL_DIR = 'models' # Directory where trained models are saved
 DATA_DIR = 'data'    # Directory where datasets are stored
 DEFAULT_DATASET = 'Cora'
 DEFAULT_MODEL = 'GCN'
-AVAILABLE_DATASETS = ['Cora', 'CiteSeer', 'PubMed', 'Jazz']
+# --- AMENDED: Restrict datasets to Cora and CiteSeer ---
+AVAILABLE_DATASETS = ['Cora', 'CiteSeer']
 AVAILABLE_MODELS = ['GCN', 'GAT']
 NODE_DIM_REDUCTION = 'TSNE' # 'PCA', 'TSNE', or 'UMAP'
 
@@ -68,16 +59,12 @@ class GCNNet(torch.nn.Module):
         self.conv2 = GCNConv(hidden_channels, out_channels)
         self.init_args = {'hidden_channels': hidden_channels} # Store args
 
-    # The standard forward method for GCN usually returns log_softmax,
-    # which is often suitable for GNNExplainer's default 'log_probs' return type.
-    # This forward is designed to be compatible with Explainer.
     def forward(self, x, edge_index, **kwargs): # Accept potential extra kwargs from Explainer
         x = self.conv1(x, edge_index)
         x = F.relu(x)
         x = self.conv2(x, edge_index)
         return F.log_softmax(x, dim=1) # Return only scores for explainer
 
-    # Separate method for inference if you need embeddings alongside predictions
     def inference(self, data):
         x, edge_index = data.x, data.edge_index
         x = self.conv1(x, edge_index)
@@ -97,15 +84,12 @@ class GATNet(torch.nn.Module):
                              concat=False, dropout=0.6)
         self.init_args = {'hidden_channels': hidden_channels, 'heads': heads} # Store args
 
-    # Standard forward for explainer (only returns scores)
     def forward(self, x, edge_index, **kwargs): # Accept potential extra kwargs from Explainer
-        # Ensure dropout is off by calling model.eval() before using the explainer
         x, _ = self.conv1(x, edge_index, return_attention_weights=False)
         x = F.elu(x)
         x, _ = self.conv2(x, edge_index, return_attention_weights=False)
         return F.log_softmax(x, dim=1)
 
-    # Separate method for inference needing embeddings or attention
     def inference(self, data, return_attention_weights=False):
         x, edge_index = data.x, data.edge_index
         x, att1 = self.conv1(x, edge_index, return_attention_weights=return_attention_weights)
@@ -120,133 +104,26 @@ class GATNet(torch.nn.Module):
         else:
             return log_probs, embeddings
 
-
-class JazzDatasetWrapper:
-    """Wraps the Jazz dataset PyG Data object to mimic Planetoid structure."""
-    def __init__(self, data, num_node_features, num_classes):
-        self.data = data # The actual PyG Data object
-        self.num_node_features = num_node_features
-        self.num_classes = num_classes
-        self.name = 'Jazz' # Keep the name attribute if needed elsewhere
-
-    def __getitem__(self, idx):
-        if idx == 0:
-            return self.data
-        else:
-            raise IndexError("JazzDatasetWrapper index out of range")
-
-    def __len__(self):
-        return 1
-
 # --- Helper Functions ---
-def load_jazz_dataset(path, n2v_dim=16, walk_len=10, num_walk=50, workers=4):
-    """Loads the Jazz dataset, generates Node2Vec embeddings, and prepares PyG Data."""
-    try:
-        edge_file = os.path.join(path, 'jazz.cites')
-        content_file = os.path.join(path, 'jazz.content')
-        print(f"--- Debugging load_jazz_dataset ---")
-        print(f"Attempting to load from base path: {path}")
-        print(f"Checking for edge file at: {os.path.abspath(edge_file)}")
-        print(f"Checking for content file at: {os.path.abspath(content_file)}")
-        if not os.path.exists(edge_file) or not os.path.exists(content_file):
-            print(f"*** ERROR: Jazz dataset files not found.")
-            return None
-        else:
-            print(f"Files found. Proceeding...")
-        try:
-            content_df = pd.read_csv(content_file, sep='\t', header=None)
-            node_ids = content_df.iloc[:, 0].astype(int).values
-            if content_df.shape[1] > 2:
-                original_features = content_df.iloc[:, 1:-1].values
-                print(f"  App: Found original features shape: {original_features.shape}")
-            else:
-                original_features = None
-                print("  App: No original features found.")
-            labels = content_df.iloc[:, -1].astype(int).values
-            node_ids_list = sorted(list(np.unique(node_ids)))
-            num_nodes = len(node_ids_list)
-        except Exception as e:
-            print(f"App: Error reading Jazz content file: {e}")
-            return None
-        node_map = {old_id: new_id for new_id, old_id in enumerate(node_ids_list)}
-        G = nx.Graph()
-        G.add_nodes_from(node_map.keys())
-        edges_added_count = 0
-        with open(edge_file, 'r') as f:
-            for line in f:
-                if line.startswith('#'): continue
-                try:
-                    u, v = map(int, line.strip().split('\t'))
-                    if u in node_map and v in node_map:
-                        G.add_edge(u, v)
-                        edges_added_count += 1
-                except ValueError: pass
-        print(f"  App: Built graph with {G.number_of_nodes()} nodes and {edges_added_count} edges.")
-        print(f"  App: Generating Node2Vec (dim={n2v_dim}, len={walk_len}, num={num_walk})...")
-        node2vec = Node2Vec(G, dimensions=n2v_dim, walk_length=walk_len, num_walks=num_walk, workers=workers, quiet=True)
-        model_n2v = node2vec.fit(window=5, min_count=1, batch_words=4, epochs=1)
-        print("  App: Node2Vec fitting complete.")
-        n2v_embeddings = np.zeros((num_nodes, n2v_dim))
-        for old_id, new_id in node_map.items():
-            try: n2v_embeddings[new_id] = model_n2v.wv[str(old_id)]
-            except KeyError: pass
-        if original_features is not None:
-            aligned_original_features = np.zeros((num_nodes, original_features.shape[1]))
-            feature_map = dict(zip(content_df.iloc[:, 0].astype(int).values, original_features))
-            for old_id, new_id in node_map.items():
-                 if old_id in feature_map: aligned_original_features[new_id] = feature_map[old_id]
-            final_features = np.hstack((aligned_original_features, n2v_embeddings))
-        else:
-            final_features = n2v_embeddings
-        x = torch.tensor(final_features, dtype=torch.float)
-        num_node_features = x.shape[1]
-        print(f"  App: Final feature dimension: {num_node_features}")
-        aligned_labels = np.zeros(num_nodes, dtype=int)
-        label_map = dict(zip(content_df.iloc[:, 0].astype(int).values, labels))
-        for old_id, new_id in node_map.items():
-            if old_id in label_map: aligned_labels[new_id] = label_map[old_id]
-        y = torch.tensor(aligned_labels, dtype=torch.long)
-        num_classes = len(torch.unique(y))
-        mapped_edges = []
-        for u, v in G.edges(): mapped_edges.append([node_map[u], node_map[v]])
-        edge_index_mapped = torch.tensor(mapped_edges, dtype=torch.long).t().contiguous()
-        from torch_geometric.utils import to_undirected
-        edge_index = to_undirected(edge_index_mapped)
-        data = Data(x=x, edge_index=edge_index, y=y)
-        data.num_nodes = num_nodes
-        data.train_mask = torch.zeros(num_nodes, dtype=torch.bool)
-        data.val_mask = torch.zeros(num_nodes, dtype=torch.bool)
-        data.test_mask = torch.zeros(num_nodes, dtype=torch.bool)
-        wrapper_instance = JazzDatasetWrapper(data, num_node_features, num_classes)
-        print("App: Dataset 'Jazz' loaded successfully using faster Node2Vec.")
-        return wrapper_instance
-    except Exception as e:
-        print(f"App: Error loading or processing Jazz dataset: {e}")
-        import traceback
-        traceback.print_exc()
-        return None
-
 def load_dataset(name):
-    """Loads a dataset for the dashboard, handling Planetoid and custom Jazz."""
+    """Loads a Planetoid dataset for the dashboard."""
     global DATA_DIR
     try:
         script_dir = os.path.dirname(__file__) if '__file__' in locals() else '.'
         base_data_dir = os.path.join(script_dir, DATA_DIR)
         path = os.path.join(base_data_dir, name)
         print(f"App: Attempting to load dataset '{name}'...")
-        if name in ['Cora', 'CiteSeer', 'PubMed']:
-             dataset = Planetoid(root=base_data_dir, name=name)
-             print(f"App: Planetoid dataset '{name}' loaded successfully.")
-             return dataset
-        elif name == 'Jazz':
-             print(f"App: Calling load_jazz_dataset for path: {path}")
-             return load_jazz_dataset(path)
+        # --- AMENDED: Simplified to only load from available Planetoid datasets ---
+        if name in AVAILABLE_DATASETS:
+            dataset = Planetoid(root=base_data_dir, name=name)
+            print(f"App: Planetoid dataset '{name}' loaded successfully.")
+            return dataset
         else:
             print(f"App: Dataset '{name}' is not recognized by the load_dataset function.")
             return None
     except FileNotFoundError:
-         print(f"App: Error loading dataset {name}. Required files not found in expected location: {path}")
-         return None
+        print(f"App: Error loading dataset {name}. Required files not found in expected location: {path}")
+        return None
     except Exception as e:
         print(f"App: Error loading dataset {name}: {e}")
         import traceback
@@ -258,16 +135,20 @@ def load_model(model_type, dataset_name, device):
     model_filename = f"{model_type}_{dataset_name}.pkl"
     script_dir = os.path.dirname(__file__) if '__file__' in locals() else '.'
     model_path = os.path.join(script_dir, MODEL_DIR, model_filename)
+
     if not os.path.exists(model_path):
         print(f"Model file not found: {model_path}")
         return None
+
     try:
         dataset = load_dataset(dataset_name)
         if dataset is None: return None
         in_channels = dataset.num_node_features
         out_channels = dataset.num_classes
+
         with open(model_path, 'rb') as f:
             model_state_dict, model_args = pickle.load(f)
+
         if model_type == 'GCN':
             hidden_channels = model_args.get('hidden_channels', 16)
             model = GCNNet(in_channels, hidden_channels, out_channels)
@@ -277,14 +158,15 @@ def load_model(model_type, dataset_name, device):
             model = GATNet(in_channels, hidden_channels, out_channels, heads=heads)
         else:
             raise ValueError(f"Unknown model type: {model_type}")
+
         model.load_state_dict(model_state_dict)
         model.to(device)
         model.eval()
         print(f"Loaded model {model_filename} to {device} with args: {model_args}")
         return model
     except FileNotFoundError:
-         print(f"Error: Model file not found at {model_path}. Ensure it exists.")
-         return None
+        print(f"Error: Model file not found at {model_path}. Ensure it exists.")
+        return None
     except Exception as e:
         print(f"Error loading model {model_path}: {e}")
         import traceback
@@ -299,14 +181,11 @@ def run_inference(model, data, model_type, device):
     model.to(device)
     data = data.to(device)
     try:
-        # Use the dedicated inference method if available
         if hasattr(model, 'inference'):
             log_probs, embeddings = model.inference(data)
-        else: # Fallback to standard forward, assuming it returns scores and embeddings
-             # This might fail if standard forward was changed for explainer
-             # Re-evaluate if this fallback is needed or if models should always have .inference()
-             print("Warning: Using standard model forward for inference, ensure it returns (log_probs, embeddings).")
-             log_probs, embeddings = model(data.x, data.edge_index) # Assuming standard forward takes x, edge_index
+        else:
+            print("Warning: Using standard model forward for inference, ensure it returns (log_probs, embeddings).")
+            log_probs, embeddings = model(data.x, data.edge_index)
 
         predictions = log_probs.argmax(dim=1)
         return predictions.cpu(), embeddings.cpu()
@@ -328,20 +207,20 @@ def get_attention_weights(model, data, node_idx, device):
         print(f"Invalid node index {node_idx} for attention calculation.")
         return None
     try:
-        # Use the dedicated inference method if available and it returns attention
         if hasattr(model, 'inference'):
              _, _, attention_output = model.inference(data, return_attention_weights=True)
-        else: # Assume standard forward can return attention (might need adjustment)
-             # This path is unlikely if GATNet always has .inference()
+        else:
              print("Warning: Trying to get attention from standard GAT forward.")
-             _, _, attention_output = model(data.x, data.edge_index, return_attention_weights=True) # Hypothetical call
+             _, _, attention_output = model(data.x, data.edge_index, return_attention_weights=True)
 
         if attention_output is None:
              print("Model did not return attention weights.")
              return None
+
         edge_index_att, alpha_att = attention_output[-1]
         mask = edge_index_att[1] == node_idx
         if not torch.any(mask): return None
+
         neighbor_indices = edge_index_att[0][mask]
         attention_scores = alpha_att[mask].mean(dim=1).squeeze()
         return neighbor_indices.cpu().numpy(), attention_scores.cpu().numpy()
@@ -351,17 +230,146 @@ def get_attention_weights(model, data, node_idx, device):
         traceback.print_exc()
         return None
 
-def data_to_cytoscape(data, predictions=None, class_map=None, selected_node_id=None, selected_edge_data=None, neighbor_ids=None, explanation_masks=None):
+# --- CPA-IV Helper Function (NEW) ---
+@torch.no_grad()
+def run_cpa_iv(model, data, node_idx, device, top_k=3, max_path_len=3):
+    """
+    Identifies causal paths influencing a node's prediction using the CPA-IV method.
+    This function performs a simplified causal analysis by measuring the drop in the
+    prediction probability of the original class when a path is removed.
+
+    Args:
+        model: The trained GNN model.
+        data: The full PyG Data object.
+        node_idx: The index of the node to explain.
+        device: The torch device to run on.
+        top_k (int): The number of top causal paths to return.
+        max_path_len (int): The maximum length of paths to consider.
+
+    Returns:
+        A list of dictionaries, where each dictionary represents a causal path
+        with its nodes and a score indicating its influence.
+    """
+    model.eval()
+    model.to(device)
+    data = data.to(device)
+
+    # 1. Get the k-hop subgraph (computation graph) around the target node.
+    # The number of hops should match the number of layers in the GNN.
+    num_hops = max_path_len
+    subset, sub_edge_index, mapping, _ = k_hop_subgraph(
+        node_idx, num_hops, data.edge_index, relabel_nodes=True, num_nodes=data.num_nodes
+    )
+    
+    # The target node is re-indexed to `sub_node_idx` in the new subgraph.
+    sub_node_idx = torch.where(subset == node_idx)[0].item()
+
+    # Create a Data object for the subgraph.
+    sub_data = Data(x=data.x[subset], edge_index=sub_edge_index).to(device)
+
+    # 2. Get the baseline prediction score for the target node within its subgraph.
+    try:
+        if hasattr(model, 'inference'):
+            log_probs, _ = model.inference(sub_data)
+        else:
+            log_probs = model(sub_data.x, sub_data.edge_index)
+    except Exception as e:
+        print(f"CPA-IV Error: Inference failed on subgraph. {e}")
+        return []
+
+    original_probs = torch.exp(log_probs)
+    predicted_class = original_probs[sub_node_idx].argmax()
+    baseline_score = original_probs[sub_node_idx, predicted_class].item()
+
+    # 3. Enumerate paths in the subgraph using NetworkX.
+    # Remove self-loops for cleaner pathfinding.
+    sub_edge_index_no_loops, _ = remove_self_loops(sub_data.edge_index)
+    nx_graph = to_networkx(Data(edge_index=sub_edge_index_no_loops, num_nodes=sub_data.num_nodes), to_undirected=False)
+
+    paths = []
+    # Find all simple paths from any node to the target node, up to max_path_len.
+    for source_node in nx_graph.nodes():
+        if source_node != sub_node_idx:
+            for path in nx.all_simple_paths(nx_graph, source=source_node, target=sub_node_idx, cutoff=max_path_len):
+                if len(path) > 1: # Path must have at least one edge.
+                    paths.append(path)
+    
+    if not paths:
+        print(f"CPA-IV: No paths of length <= {max_path_len} found leading to node {node_idx}.")
+        return []
+
+    # 4. Causal Intervention: Evaluate the effect of removing each path.
+    path_effects = []
+    # Limit number of paths to check for performance, preventing slowdown on dense subgraphs.
+    paths_to_evaluate = paths[:100]
+    print(f"CPA-IV: Evaluating {len(paths_to_evaluate)} paths for node {node_idx}...")
+
+    for path in paths_to_evaluate:
+        perturbed_edge_index = sub_data.edge_index.clone()
+        
+        # Sequentially remove edges in the current path.
+        for i in range(len(path) - 1):
+            u, v = path[i], path[i+1]
+            # Create a mask to find and remove the edge (and its reverse).
+            mask_fwd = (perturbed_edge_index[0] == u) & (perturbed_edge_index[1] == v)
+            mask_bwd = (perturbed_edge_index[0] == v) & (perturbed_edge_index[1] == u)
+            keep_mask = ~(mask_fwd | mask_bwd)
+            perturbed_edge_index = perturbed_edge_index[:, keep_mask]
+
+        # Get prediction with the path removed.
+        perturbed_data = Data(x=sub_data.x, edge_index=perturbed_edge_index).to(device)
+        try:
+            if hasattr(model, 'inference'):
+                perturbed_log_probs, _ = model.inference(perturbed_data)
+            else:
+                perturbed_log_probs = model(perturbed_data.x, perturbed_data.edge_index)
+
+            perturbed_probs = torch.exp(perturbed_log_probs)
+            perturbed_score = perturbed_probs[sub_node_idx, predicted_class].item()
+            
+            # Causal effect = baseline_score - perturbed_score. A high score means removing the path hurts the prediction.
+            causal_effect = baseline_score - perturbed_score
+            
+            # Remap path from subgraph indices back to original graph indices.
+            original_path = [subset[node].item() for node in path]
+            path_effects.append({'path': original_path, 'score': causal_effect})
+
+        except Exception:
+            continue
+
+    # 5. Sort paths by causal effect and return the top_k.
+    sorted_paths = sorted(path_effects, key=lambda x: x['score'], reverse=True)
+    
+    print(f"CPA-IV: Found {len(sorted_paths)} influential paths. Top {top_k} are:")
+    for p in sorted_paths[:top_k]:
+        print(f"  Path: {p['path']}, Score: {p['score']:.4f}")
+
+    return sorted_paths[:top_k]
+
+def data_to_cytoscape(data, predictions=None, class_map=None, selected_node_id=None, selected_edge_data=None, neighbor_ids=None, explanation_masks=None, causal_paths=None):
     """Converts PyG Data object to Cytoscape elements list."""
     if data is None or data.num_nodes == 0: return []
     if neighbor_ids is None: neighbor_ids = set()
     else: neighbor_ids = set(neighbor_ids)
 
+    # --- NEW: Process causal path data for styling ---
+    if causal_paths is None: causal_paths = []
+    causal_nodes = {} # {node_id_str: path_rank}
+    causal_edges = {} # {tuple(sorted(u_str, v_str)): path_rank}
+    for i, p_info in enumerate(causal_paths):
+        path = p_info['path']
+        rank = i + 1 # Rank is 1, 2, 3 for top paths
+        for node_id in path:
+            causal_nodes[str(node_id)] = min(rank, causal_nodes.get(str(node_id), float('inf')))
+        for j in range(len(path) - 1):
+            u, v = str(path[j]), str(path[j+1])
+            edge_tuple = tuple(sorted((u, v)))
+            causal_edges[edge_tuple] = min(rank, causal_edges.get(edge_tuple, float('inf')))
+
     explained_edge_mask = None
     edge_importance_threshold = 0.5 # Example threshold
     if explanation_masks and 'edge_mask' in explanation_masks and explanation_masks['edge_mask'] is not None:
         explained_edge_mask = explanation_masks['edge_mask']
-        # Convert to numpy if it's a tensor, handle list case
         if isinstance(explained_edge_mask, torch.Tensor):
             explained_edge_mask = explained_edge_mask.cpu().numpy()
         elif isinstance(explained_edge_mask, list):
@@ -386,22 +394,28 @@ def data_to_cytoscape(data, predictions=None, class_map=None, selected_node_id=N
         node_classes = []
         node_base_color = default_color
         if preds_list is not None and i < len(preds_list):
-             pred_class = int(preds_list[i])
-             node_data['class_pred'] = pred_class
-             node_base_color = color_palette[pred_class % len(color_palette)]
-             if class_map and pred_class in class_map: node_data['label'] += f'\n({class_map[pred_class]})'
+            pred_class = int(preds_list[i])
+            node_data['class_pred'] = pred_class
+            node_base_color = color_palette[pred_class % len(color_palette)]
+            if class_map and pred_class in class_map: node_data['label'] += f'\n({class_map[pred_class]})'
         if hasattr(data, 'y') and data.y is not None and i < len(data.y):
-             true_class = int(data.y[i].item())
-             node_data['true_class'] = true_class
-             if class_map and true_class in class_map: node_data['true_label'] = class_map[true_class]
-             elif true_class != -1: node_data['true_label'] = f'Class {true_class}'
-             else: node_data['true_label'] = 'N/A'
+            true_class = int(data.y[i].item())
+            node_data['true_class'] = true_class
+            if class_map and true_class in class_map: node_data['true_label'] = class_map[true_class]
+            elif true_class != -1: node_data['true_label'] = f'Class {true_class}'
+            else: node_data['true_label'] = 'N/A'
+
         is_selected = False
         if selected_node_id is not None and node_id_str == selected_node_id:
             is_selected = True
             node_classes.append('selected')
         is_neighbor = i in neighbor_ids
         if is_neighbor and not is_selected: node_classes.append('neighbor')
+        
+        # --- NEW: Add causal path class if node is in a path ---
+        if node_id_str in causal_nodes:
+            node_classes.append(f'causal-path-node-{causal_nodes[node_id_str]}')
+
         node_data['classes'] = ' '.join(node_classes)
         node_style = {'background-color': node_base_color}
         nodes.append({'data': node_data, 'style': node_style})
@@ -419,18 +433,25 @@ def data_to_cytoscape(data, predictions=None, class_map=None, selected_node_id=N
             source_int = edge_index_display[0, i]
             target_int = edge_index_display[1, i]
             if source_int >= data.num_nodes or target_int >= data.num_nodes: continue
+
             edge_id = f"{source}_{target}_{i}"
             edge_data = {'id': edge_id, 'source': source, 'target': target}
             edge_classes = []
             edge_style = {}
+
             is_selected_edge = False
             if sel_source is not None and sel_target is not None:
-                 if (sel_source == source and sel_target == target) or (sel_source == target and sel_target == source):
-                      is_selected_edge = True
+                if (sel_source == source and sel_target == target) or (sel_source == target and sel_target == source):
+                    is_selected_edge = True
             if is_selected_edge: edge_classes.append('selected-edge')
 
+            # --- NEW: Add causal path class if edge is in a path ---
+            edge_tuple_sorted = tuple(sorted((source, target)))
+            if edge_tuple_sorted in causal_edges:
+                edge_classes.append(f'causal-path-edge-{causal_edges[edge_tuple_sorted]}')
+
             is_explained_edge = False
-            if explained_edge_mask is not None and isinstance(explained_edge_mask, np.ndarray): # Check if mask is valid numpy array
+            if explained_edge_mask is not None and isinstance(explained_edge_mask, np.ndarray):
                 edge_idx_forward = edge_tuple_to_idx.get((source_int, target_int))
                 edge_idx_backward = edge_tuple_to_idx.get((target_int, source_int))
                 score = 0.0
@@ -443,7 +464,7 @@ def data_to_cytoscape(data, predictions=None, class_map=None, selected_node_id=N
                     is_explained_edge = True
                     edge_classes.append('explained-edge')
                     if edge_importance_threshold < 1.0:
-                        scale_factor = max(0, (score - edge_importance_threshold) / (1.0 - edge_importance_threshold)) # Ensure non-negative
+                        scale_factor = max(0, (score - edge_importance_threshold) / (1.0 - edge_importance_threshold))
                         opacity = 0.3 + 0.7 * scale_factor
                         width = 1 + 3 * scale_factor
                         edge_style['opacity'] = min(max(opacity, 0.3), 1.0)
@@ -464,6 +485,7 @@ def plot_embeddings(embeddings, predictions, true_labels=None, class_map=None, d
     predictions_np = predictions.cpu().numpy() if isinstance(predictions, torch.Tensor) else np.array(predictions) if predictions is not None else None
     true_labels_np = true_labels.cpu().numpy() if isinstance(true_labels, torch.Tensor) else np.array(true_labels) if true_labels is not None else None
     num_nodes = embeddings_np.shape[0]
+
     if num_nodes == 0 or \
        (predictions_np is not None and embeddings_np.shape[0] != predictions_np.shape[0]) or \
        (true_labels_np is not None and embeddings_np.shape[0] != true_labels_np.shape[0]):
@@ -479,20 +501,20 @@ def plot_embeddings(embeddings, predictions, true_labels=None, class_map=None, d
     try:
         if dim_reduction == 'TSNE':
             if num_nodes < n_components + 1:
-                 print(f"Not enough samples ({num_nodes}) for t-SNE, switching to PCA.")
-                 reduction_method_used = 'PCA'; reducer = PCA(n_components=n_components)
+                print(f"Not enough samples ({num_nodes}) for t-SNE, switching to PCA.")
+                reduction_method_used = 'PCA'; reducer = PCA(n_components=n_components)
             else:
-                 perplexity = min(30.0, max(5.0, float(num_nodes - 1) / 3.0))
-                 try: reducer = TSNE(n_components=n_components, perplexity=perplexity, random_state=42, init='pca', learning_rate='auto', n_iter=300)
-                 except TypeError: print("Using older TSNE initialization."); reducer = TSNE(n_components=n_components, perplexity=perplexity, random_state=42, init='pca', n_iter=300)
+                perplexity = min(30.0, max(5.0, float(num_nodes - 1) / 3.0))
+                try: reducer = TSNE(n_components=n_components, perplexity=perplexity, random_state=42, init='pca', learning_rate='auto', n_iter=300)
+                except TypeError: print("Using older TSNE initialization."); reducer = TSNE(n_components=n_components, perplexity=perplexity, random_state=42, init='pca', n_iter=300)
         elif dim_reduction == 'UMAP':
-             effective_n_neighbors = min(n_neighbors, num_nodes - 1)
-             if effective_n_neighbors < 2:
-                  print(f"Not enough samples ({num_nodes}) for UMAP, switching to PCA.")
-                  reduction_method_used = 'PCA'; reducer = PCA(n_components=n_components)
-             else:
-                  print(f"Running UMAP with n_neighbors={effective_n_neighbors}, min_dist={min_dist}")
-                  reducer = umap.UMAP(n_neighbors=effective_n_neighbors, min_dist=min_dist, n_components=n_components, random_state=42)
+            effective_n_neighbors = min(n_neighbors, num_nodes - 1)
+            if effective_n_neighbors < 2:
+                print(f"Not enough samples ({num_nodes}) for UMAP, switching to PCA.")
+                reduction_method_used = 'PCA'; reducer = PCA(n_components=n_components)
+            else:
+                print(f"Running UMAP with n_neighbors={effective_n_neighbors}, min_dist={min_dist}")
+                reducer = umap.UMAP(n_neighbors=effective_n_neighbors, min_dist=min_dist, n_components=n_components, random_state=42)
         elif dim_reduction == 'PCA': reduction_method_used = 'PCA'; reducer = PCA(n_components=n_components)
         else: print(f"Unknown reduction method '{dim_reduction}', defaulting to PCA."); reduction_method_used = 'PCA'; reducer = PCA(n_components=n_components)
         embeddings_2d = reducer.fit_transform(embeddings_np)
@@ -504,28 +526,32 @@ def plot_embeddings(embeddings, predictions, true_labels=None, class_map=None, d
     df = pd.DataFrame(embeddings_2d, columns=['Dim 1', 'Dim 2'])
     df['Node ID'] = [str(i) for i in range(num_nodes)]
     color_column = None
+
     if predictions_np is not None:
         df['Predicted Class'] = [class_map.get(int(p), f'Class {int(p)}') for p in predictions_np] if class_map else [f'Class {int(p)}' for p in predictions_np]
         color_column = 'Predicted Class'
     else:
         df['Predicted Class'] = 'N/A'
         if true_labels_np is not None:
-             df['True Label Color'] = [class_map.get(int(t), f'Class {int(t)}') if t != -1 else 'N/A' for t in true_labels_np] if class_map else [f'Class {int(t)}' if t != -1 else 'N/A' for t in true_labels_np]
-             color_column = 'True Label Color'
+            df['True Label Color'] = [class_map.get(int(t), f'Class {int(t)}') if t != -1 else 'N/A' for t in true_labels_np] if class_map else [f'Class {int(t)}' if t != -1 else 'N/A' for t in true_labels_np]
+            color_column = 'True Label Color'
+
     if true_labels_np is not None:
         df['True Label'] = [class_map.get(int(t), f'Class {int(t)}') if t != -1 else 'N/A' for t in true_labels_np] if class_map else [f'Class {int(t)}' if t != -1 else 'N/A' for t in true_labels_np]
     else: df['True Label'] = 'N/A'
+
     hover_data = ['Node ID', 'Predicted Class', 'True Label']
     fig_title = f'Node Embeddings ({reduction_method_used})'
     try:
         fig = px.scatter(df, x='Dim 1', y='Dim 2', color=color_column, hover_data=hover_data, custom_data=['Node ID'], title=fig_title, color_discrete_sequence=px.colors.qualitative.Plotly)
         fig.update_layout(legend_title_text=color_column if color_column else 'Class', clickmode='event+select')
         fig.update_traces(marker=dict(size=8, opacity=0.8), unselected=dict(marker=dict(opacity=0.5)), selected=dict(marker=dict(size=12, opacity=1.0)))
+
         if selected_node_id is not None:
-             try:
-                 selected_point_index = df[df['Node ID'] == selected_node_id].index[0]
-                 fig.update_traces(selectedpoints=[selected_point_index], selector=dict(type='scatter'))
-             except IndexError: print(f"Warning: Selected node ID {selected_node_id} not found in embedding plot.")
+            try:
+                selected_point_index = df[df['Node ID'] == selected_node_id].index[0]
+                fig.update_traces(selectedpoints=[selected_point_index], selector=dict(type='scatter'))
+            except IndexError: print(f"Warning: Selected node ID {selected_node_id} not found in embedding plot.")
     except Exception as e:
         print(f"Error creating embeddings plot: {e}")
         fig = go.Figure(layout={'title': f"Embeddings Plot Error ({reduction_method_used})", 'xaxis': {'visible': False}, 'yaxis': {'visible': False}})
@@ -568,10 +594,10 @@ def plot_feature_histogram(features, node_id, feature_mask=None, top_k=10):
     df = pd.DataFrame({'Feature Index': plot_labels, 'Value': plot_values, 'IndexInt': indices_to_plot})
 
     if feature_mask is not None and 'feature_mask_np' in locals(): # Sort by importance if mask was valid
-         df['Importance'] = feature_mask_np[indices_to_plot]
-         df = df.sort_values('Importance', ascending=False)
+        df['Importance'] = feature_mask_np[indices_to_plot]
+        df = df.sort_values('Importance', ascending=False)
     else: # Sort by value otherwise
-         df = df.sort_values('Value', ascending=False)
+        df = df.sort_values('Value', ascending=False)
 
     fig = px.bar(df, x='Feature Index', y='Value', title=title)
     fig.update_traces(marker_color=plot_colors)
@@ -589,7 +615,6 @@ app = dash.Dash(__name__, suppress_callback_exceptions=True,
 server = app.server
 
 # --- App Layout ---
-# (Layout remains the same as the previous version - no changes needed here)
 app.layout = html.Div([
     dcc.Store(id='current-graph-store'),
     dcc.Store(id='current-model-output-store'),
@@ -597,6 +622,7 @@ app.layout = html.Div([
     dcc.Store(id='selected-edge-store'),
     dcc.Store(id='dataset-info-store'),
     dcc.Store(id='explanation-store'),
+    dcc.Store(id='cpa-iv-store'), # NEW store for Causal Path results
     html.H1("Interactive GNN Explainer", style={'textAlign': 'center', 'marginBottom': '20px'}),
     html.Div([
         html.Div([
@@ -612,7 +638,9 @@ app.layout = html.Div([
             dcc.Input(id='new-edge-target', type='text', placeholder='Target Node ID', style={'width': '120px', 'marginRight': '5px'}),
             html.Button('Add Edge', id='add-edge-button', n_clicks=0, style={'marginRight': '5px'}),
             html.Button('Remove Selected Edge', id='remove-edge-button', n_clicks=0),
-        ], style={'display': 'flex', 'alignItems': 'center', 'marginTop': '10px'})
+        ], style={'display': 'flex', 'alignItems': 'center', 'marginTop': '10px'}),
+        # --- NEW Button for CPA-IV ---
+        html.Button('Explain with Causal Paths (CPA-IV)', id='run-cpa-iv-button', n_clicks=0, style={'marginTop': '10px', 'backgroundColor': '#4CAF50', 'color': 'white'}),
     ], id='control-panel', style={'padding': '15px', 'border': '1px solid #ddd', 'borderRadius': '5px', 'marginBottom': '20px', 'backgroundColor': '#f9f9f9'}),
     html.Div(id='status-message-area', style={'padding': '10px', 'marginBottom': '10px', 'border': '1px dashed #ccc', 'borderRadius': '5px', 'minHeight': '40px', 'backgroundColor': '#f0f0f0', 'whiteSpace': 'pre-wrap'}),
     html.Div([
@@ -627,12 +655,22 @@ app.layout = html.Div([
                 layout={'name': 'cose', 'idealEdgeLength': 100, 'nodeOverlap': 20, 'refresh': 20, 'fit': True, 'padding': 30, 'randomize': False, 'componentSpacing': 100, 'nodeRepulsion': 400000, 'edgeElasticity': 100, 'nestingFactor': 5, 'gravity': 80, 'numIter': 1000, 'initialTemp': 200, 'coolingFactor': 0.95, 'minTemp': 1.0},
                 style={'width': '100%', 'height': '450px', 'border': '1px solid #ddd', 'borderRadius': '5px'},
                 stylesheet=[
+                    # Default styles
                     {'selector': 'node', 'style': { 'label': 'data(label)', 'font-size': '10px', 'text-valign': 'center', 'text-halign': 'center', 'background-color': '#808080', 'width': 15, 'height': 15, 'color': '#fff', 'text-outline-width': 2, 'text-outline-color': '#555', 'border-width': 0, 'shape': 'ellipse'}},
+                    {'selector': 'edge', 'style': {'curve-style': 'bezier', 'target-arrow-shape': 'none', 'line-color': '#cccccc', 'target-arrow-color': '#cccccc', 'opacity': 0.5, 'width': 1.5 }},
+                    # State-based styles
                     {'selector': 'node.selected', 'style': {'background-color': '#FFA500', 'width': 25, 'height': 25, 'border-color': '#FF0000', 'border-width': 3, 'shape': 'ellipse', 'z-index': 9999 }},
                     {'selector': 'node.neighbor', 'style': {'border-color': '#007bff', 'border-width': 3, 'border-style': 'dashed' }},
-                    {'selector': 'edge', 'style': {'curve-style': 'bezier', 'target-arrow-shape': 'none', 'line-color': '#cccccc', 'target-arrow-color': '#cccccc', 'opacity': 0.5, 'width': 1.5 }},
                     {'selector': 'edge.selected-edge', 'style': {'line-color': '#FF0000', 'target-arrow-color': '#FF0000', 'width': 3, 'opacity': 1.0, 'z-index': 9998 }},
-                    {'selector': 'edge.explained-edge', 'style': { 'line-color': '#39FF14', 'target-arrow-color': '#39FF14', 'width': 4, 'opacity': 0.9, 'z-index': 9997 }}
+                    # Explanation styles
+                    {'selector': 'edge.explained-edge', 'style': { 'line-color': '#39FF14', 'target-arrow-color': '#39FF14', 'width': 4, 'opacity': 0.9, 'z-index': 9997 }},
+                    # --- NEW Causal Path Styles ---
+                    {'selector': '.causal-path-node-1', 'style': {'background-color': '#FF69B4', 'shape': 'diamond', 'width': 30, 'height': 30, 'border-color': '#FF1493', 'border-width': 2, 'z-index': 10001}},
+                    {'selector': '.causal-path-edge-1', 'style': {'line-color': '#FF69B4', 'width': 5, 'opacity': 1, 'z-index': 10000, 'curve-style': 'bezier', 'target-arrow-shape': 'triangle'}},
+                    {'selector': '.causal-path-node-2', 'style': {'background-color': '#1E90FF', 'shape': 'diamond', 'width': 25, 'height': 25, 'border-color': '#4169E1', 'border-width': 2, 'z-index': 10001}},
+                    {'selector': '.causal-path-edge-2', 'style': {'line-color': '#1E90FF', 'width': 4, 'opacity': 0.9, 'z-index': 9999, 'curve-style': 'bezier', 'target-arrow-shape': 'triangle'}},
+                    {'selector': '.causal-path-node-3', 'style': {'background-color': '#ADFF2F', 'shape': 'diamond', 'width': 20, 'height': 20, 'border-color': '#7FFF00', 'border-width': 2, 'z-index': 10001}},
+                    {'selector': '.causal-path-edge-3', 'style': {'line-color': '#ADFF2F', 'width': 3, 'opacity': 0.8, 'z-index': 9998, 'curve-style': 'bezier', 'target-arrow-shape': 'triangle'}},
                 ]
             ),
             html.H3("Node Embeddings"),
@@ -648,6 +686,9 @@ app.layout = html.Div([
             html.Div(id='neighborhood-info-view', style={'border': '1px solid #ddd', 'borderRadius': '5px', 'padding': '10px', 'minHeight': '150px', 'maxHeight': '250px', 'overflowY': 'auto', 'marginBottom': '10px', 'backgroundColor': '#f9f9f9', 'fontSize': 'small'}),
             html.H3("GNN Explanation (Selected Node)"),
             html.Div(id='reasoning-output', style={'padding': '10px', 'marginTop': '5px', 'fontStyle': 'italic', 'color': '#333', 'border': '1px solid #e0e0e0', 'borderRadius': '5px', 'backgroundColor': '#fafafa', 'minHeight': '80px'}),
+            # --- NEW Causal Path Output ---
+            html.H3("Causal Path Explanation (CPA-IV)"),
+            html.Div(id='cpa-iv-output', style={'border': '1px solid #ddd', 'borderRadius': '5px', 'padding': '10px', 'minHeight': '80px', 'marginBottom': '10px', 'backgroundColor': '#f9f9f9', 'fontSize': 'small'}),
             html.H3("Attention Weights (GAT Only)"),
             dcc.Graph(id='attention-view', style={'height': '250px'})
         ], style={'width': '48%', 'display': 'inline-block', 'verticalAlign': 'top'})
@@ -663,26 +704,31 @@ app.layout = html.Div([
     Output('dataset-info-store', 'data'),
     Output('status-message-area', 'children', allow_duplicate=True),
     Output('explanation-store', 'data', allow_duplicate=True),
+    Output('cpa-iv-store', 'data', allow_duplicate=True),
     Input('dataset-dropdown', 'value'),
     prevent_initial_call='initial_duplicate'
 )
 def load_dataset_callback(dataset_name):
-    """Loads dataset, stores its basic structure and info."""
+    """Loads dataset, stores its basic structure and info, and clears explanations."""
     print(f"Loading dataset: {dataset_name}")
     status_message = f"Loading dataset '{dataset_name}'..."
     dataset = load_dataset(dataset_name)
     empty_graph_store = {'edge_index': [[], []], 'features': [], 'labels': [], 'num_nodes': 0, 'train_mask': [], 'val_mask': [], 'test_mask': []}
     empty_dataset_info = {'class_map': {}, 'num_node_features': 0, 'num_classes': 0}
+    clear_explanation = None # Clear both explanation stores
+
     if dataset is None:
         error_message = f"Error: Failed to load dataset '{dataset_name}'."
-        return empty_graph_store, empty_dataset_info, error_message, None
+        return empty_graph_store, empty_dataset_info, error_message, clear_explanation, clear_explanation
+
     try:
         data = dataset[0]
         required_attrs = ['edge_index', 'x', 'y', 'num_nodes']
         missing_attrs = [attr for attr in required_attrs if not hasattr(data, attr)]
         if missing_attrs:
             error_message = f"Error: Dataset '{dataset_name}' missing attributes: {missing_attrs}"
-            return empty_graph_store, empty_dataset_info, error_message, None
+            return empty_graph_store, empty_dataset_info, error_message, clear_explanation, clear_explanation
+
         graph_store_data = {
             'edge_index': data.edge_index.cpu().tolist() if data.edge_index is not None else [[],[]],
             'features': data.x.cpu().tolist() if data.x is not None else [],
@@ -692,37 +738,38 @@ def load_dataset_callback(dataset_name):
             'val_mask': data.val_mask.cpu().tolist() if hasattr(data, 'val_mask') and data.val_mask is not None else [False]*data.num_nodes,
             'test_mask': data.test_mask.cpu().tolist() if hasattr(data, 'test_mask') and data.test_mask is not None else [False]*data.num_nodes,
         }
+
         class_map = {}
         if hasattr(dataset, 'num_classes') and data.y is not None:
             num_classes = dataset.num_classes
             class_map = {i: f'Class {i}' for i in range(num_classes)}
+            # --- AMENDED: Removed class maps for PubMed and Jazz ---
             try:
                 ds_name_lower = dataset_name.lower()
                 if ds_name_lower == 'cora' and num_classes == 7: class_map = {0: 'Theory', 1: 'RL', 2: 'GA', 3: 'NN', 4: 'Prob', 5: 'Case', 6: 'Rule'}
                 elif ds_name_lower == 'citeseer' and num_classes == 6: class_map = {0: 'Agents', 1: 'AI', 2: 'DB', 3: 'IR', 4: 'ML', 5: 'HCI'}
-                elif ds_name_lower == 'pubmed' and num_classes == 3: class_map = {0: 'Diabetes Exp', 1: 'Diabetes T1', 2: 'Diabetes T2'}
-                elif ds_name_lower == 'jazz':
-                     unique_labels = sorted(torch.unique(data.y).tolist())
-                     class_map = {i: f'Community {i}' for i in unique_labels if i >= 0}
             except Exception as map_err: print(f"Warning: Could not apply specific class names: {map_err}")
+
         dataset_info = {
             'class_map': class_map,
             'num_node_features': dataset.num_node_features if hasattr(dataset, 'num_node_features') else 0,
             'num_classes': dataset.num_classes if hasattr(dataset, 'num_classes') else 0
         }
+
         status_message = f"Dataset '{dataset_name}' loaded. Nodes: {data.num_nodes}, Edges: {data.edge_index.shape[1] if data.edge_index is not None else 0}, Features: {dataset_info['num_node_features']}."
         print(status_message)
-        return graph_store_data, dataset_info, status_message, None
+        return graph_store_data, dataset_info, status_message, clear_explanation, clear_explanation
     except Exception as e:
         error_message = f"Error processing data from '{dataset_name}': {e}"
         import traceback; traceback.print_exc()
-        return empty_graph_store, empty_dataset_info, error_message, None
+        return empty_graph_store, empty_dataset_info, error_message, clear_explanation, clear_explanation
 
 # Run Inference
 @callback(
     Output('current-model-output-store', 'data'),
     Output('status-message-area', 'children', allow_duplicate=True),
     Output('explanation-store', 'data', allow_duplicate=True),
+    Output('cpa-iv-store', 'data', allow_duplicate=True),
     Input('current-graph-store', 'data'),
     Input('model-dropdown', 'value'),
     State('dataset-dropdown', 'value'),
@@ -734,18 +781,21 @@ def run_inference_callback(graph_store_data, model_type, dataset_name):
     print(f"Running inference callback. Trigger: {triggered_input}")
     empty_output = {'predictions': None, 'embeddings': None}
     clear_explanation = None
+
     if not graph_store_data or graph_store_data.get('num_nodes', 0) == 0:
         print("Inference skipped: Graph data empty.")
-        return empty_output, "Load a dataset and model.", clear_explanation
+        return empty_output, "Load a dataset and model.", clear_explanation, clear_explanation
     if not model_type or not dataset_name:
         print("Inference skipped: Missing model/dataset name.")
-        return no_update, "Select dataset and model.", clear_explanation
+        return no_update, "Select dataset and model.", clear_explanation, clear_explanation
+
     status_message = f"Loading {model_type} model for {dataset_name} and running inference on {device}..."
     model = load_model(model_type, dataset_name, device)
     if model is None:
         error_message = f"Inference skipped: {model_type} model for {dataset_name} could not be loaded."
         print(error_message)
-        return empty_output, error_message, clear_explanation
+        return empty_output, error_message, clear_explanation, clear_explanation
+
     try:
         current_data = Data(
             x=torch.tensor(graph_store_data['features'], dtype=torch.float),
@@ -756,16 +806,18 @@ def run_inference_callback(graph_store_data, model_type, dataset_name):
     except Exception as e:
         error_message = f"Error reconstructing graph data: {e}"
         print(error_message)
-        return empty_output, error_message, clear_explanation
+        return empty_output, error_message, clear_explanation, clear_explanation
+
     predictions, embeddings = run_inference(model, current_data, model_type, device)
     if predictions is None or embeddings is None:
         error_message = f"Inference failed for {model_type} on {dataset_name} using {device}."
         print(error_message)
-        return empty_output, error_message, clear_explanation
+        return empty_output, error_message, clear_explanation, clear_explanation
+
     print(f"Inference complete. Predictions shape: {predictions.shape}, Embeddings shape: {embeddings.shape}")
     status_message = f"Inference complete for {model_type} on {dataset_name} (using {device})."
     output_data = {'predictions': predictions.tolist(), 'embeddings': embeddings.tolist()}
-    return output_data, status_message, clear_explanation
+    return output_data, status_message, clear_explanation, clear_explanation
 
 # --- Graph Editing Callbacks (Add Node, Remove Node, Add Edge, Remove Edge) ---
 # Add Node
@@ -781,21 +833,26 @@ def add_node_like_selected_callback(n_clicks, selected_node_data, graph_store_da
     if n_clicks == 0: return no_update, no_update
     if not selected_node_data or 'id' not in selected_node_data: return no_update, "Select a node to copy features."
     if not graph_store_data or graph_store_data.get('num_nodes', 0) == 0: return no_update, "Graph data not loaded."
+
     try:
         template_node_id = int(selected_node_data['id'])
         num_nodes = graph_store_data['num_nodes']
         if not (0 <= template_node_id < num_nodes): return no_update, f"Invalid template node ID: {template_node_id}"
+
         features_to_copy = graph_store_data['features'][template_node_id]
         new_node_id = num_nodes
+
         new_graph_data = copy.deepcopy(graph_store_data)
         new_graph_data['num_nodes'] += 1
         new_graph_data['features'].append(copy.deepcopy(features_to_copy))
         new_graph_data['labels'].append(-1)
         new_graph_data['train_mask'].append(False); new_graph_data['val_mask'].append(False); new_graph_data['test_mask'].append(False)
+
         status_message = f"Added Node {new_node_id} (copied from Node {template_node_id}). Total: {new_graph_data['num_nodes']}"
         print(status_message)
         return new_graph_data, status_message
-    except Exception as e: error_message = f"Error adding node: {e}"; print(error_message); return no_update, error_message
+    except Exception as e:
+        error_message = f"Error adding node: {e}"; print(error_message); return no_update, error_message
 
 # Remove Node
 @callback(
@@ -810,20 +867,25 @@ def add_node_like_selected_callback(n_clicks, selected_node_data, graph_store_da
 def remove_node_callback(n_clicks, selected_node_data, graph_store_data):
     if n_clicks == 0 or not graph_store_data: return no_update, no_update, no_update
     if not selected_node_data or 'id' not in selected_node_data: return no_update, "Select a node to remove.", no_update
-    try: node_id_to_remove = int(selected_node_data['id'])
+    try:
+        node_id_to_remove = int(selected_node_data['id'])
     except (ValueError, TypeError): return no_update, "Invalid selected node ID.", no_update
+
     print(f"Attempting to remove node: {node_id_to_remove}")
     try:
         num_nodes = graph_store_data['num_nodes']
         if not (0 <= node_id_to_remove < num_nodes): return no_update, f"Invalid node ID: {node_id_to_remove}", no_update
         if num_nodes <= 1: return no_update, "Cannot remove last node.", no_update
+
         new_graph_data = copy.deepcopy(graph_store_data)
+
         node_mask = [i != node_id_to_remove for i in range(num_nodes)]
         new_graph_data['features'] = [f for i, f in enumerate(new_graph_data['features']) if node_mask[i]]
         new_graph_data['labels'] = [l for i, l in enumerate(new_graph_data['labels']) if node_mask[i]]
         new_graph_data['train_mask'] = [m for i, m in enumerate(new_graph_data['train_mask']) if node_mask[i]]
         new_graph_data['val_mask'] = [m for i, m in enumerate(new_graph_data['val_mask']) if node_mask[i]]
         new_graph_data['test_mask'] = [m for i, m in enumerate(new_graph_data['test_mask']) if node_mask[i]]
+
         edge_index = torch.tensor(new_graph_data['edge_index'], dtype=torch.long)
         remapped_edge_index_list = [[], []]
         if edge_index.numel() > 0:
@@ -838,12 +900,15 @@ def remove_node_callback(n_clicks, selected_node_data, graph_store_data):
                 valid_edge_mask = torch.all(remapped_edge_index != -1, dim=0)
                 remapped_edge_index = remapped_edge_index[:, valid_edge_mask]
                 remapped_edge_index_list = remapped_edge_index.tolist()
+
         new_graph_data['num_nodes'] = len(new_graph_data['features'])
         new_graph_data['edge_index'] = remapped_edge_index_list
+
         status_message = f"Removed Node {node_id_to_remove}. New count: {new_graph_data['num_nodes']}"
         print(status_message)
         return new_graph_data, status_message, None
-    except Exception as e: error_message = f"Error removing node: {e}"; print(error_message); return no_update, error_message, no_update
+    except Exception as e:
+        error_message = f"Error removing node: {e}"; print(error_message); return no_update, error_message, no_update
 
 # Add Edge
 @callback(
@@ -858,13 +923,16 @@ def remove_node_callback(n_clicks, selected_node_data, graph_store_data):
 def add_edge_callback(n_clicks, source_str, target_str, graph_store_data):
     if n_clicks == 0 or not graph_store_data: return no_update, no_update
     if not source_str or not target_str: return no_update, "Enter source and target IDs."
-    try: source_id, target_id = int(source_str), int(target_str)
+    try:
+        source_id, target_id = int(source_str), int(target_str)
     except (ValueError, TypeError): return no_update, "IDs must be integers."
+
     print(f"Attempting to add edge: {source_id} -> {target_id}")
     try:
         num_nodes = graph_store_data['num_nodes']
         if not (0 <= source_id < num_nodes and 0 <= target_id < num_nodes): return no_update, f"Invalid ID(s). Max is {num_nodes-1}."
         if source_id == target_id: return no_update, "Self-loops not added via button."
+
         new_graph_data = copy.deepcopy(graph_store_data)
         edge_index_list = new_graph_data['edge_index']
         if not edge_index_list: edge_index_list = [[], []]
@@ -873,13 +941,15 @@ def add_edge_callback(n_clicks, source_str, target_str, graph_store_data):
             edge_set = set(zip(edge_index_list[0], edge_index_list[1]))
             if (source_id, target_id) in edge_set or (target_id, source_id) in edge_set: exists = True
         if exists: return no_update, f"Edge {source_id}-{target_id} already exists."
+
         edge_index_list[0].extend([source_id, target_id])
         edge_index_list[1].extend([target_id, source_id])
         new_graph_data['edge_index'] = edge_index_list
         status_message = f"Added edge {source_id}-{target_id}."
         print(status_message)
         return new_graph_data, status_message
-    except Exception as e: error_message = f"Error adding edge: {e}"; print(error_message); return no_update, error_message
+    except Exception as e:
+        error_message = f"Error adding edge: {e}"; print(error_message); return no_update, error_message
 
 # Remove Edge
 @callback(
@@ -893,28 +963,34 @@ def add_edge_callback(n_clicks, source_str, target_str, graph_store_data):
 )
 def remove_edge_callback(n_clicks, source_input_str, target_input_str, selected_edge_data, graph_store_data):
     if n_clicks == 0 or not graph_store_data: return no_update, no_update, no_update if ctx.triggered_id == 'remove-edge-button' else selected_edge_data
+
     source_id_to_remove, target_id_to_remove, source_method = None, None, None
     if source_input_str and target_input_str:
-        try: source_id_to_remove, target_id_to_remove = int(source_input_str), int(target_input_str); source_method = 'input'
+        try:
+            source_id_to_remove, target_id_to_remove = int(source_input_str), int(target_input_str); source_method = 'input'
         except (ValueError, TypeError): return no_update, "Invalid Node IDs in input.", selected_edge_data
     elif selected_edge_data and 'source' in selected_edge_data and 'target' in selected_edge_data:
-        try: source_id_to_remove, target_id_to_remove = int(selected_edge_data['source']), int(selected_edge_data['target']); source_method = 'selection'
+        try:
+            source_id_to_remove, target_id_to_remove = int(selected_edge_data['source']), int(selected_edge_data['target']); source_method = 'selection'
         except (ValueError, TypeError, KeyError): return no_update, "Invalid selected edge data.", None
     else: return no_update, "Specify edge via input or selection.", selected_edge_data
+
     print(f"Attempting edge removal: {source_id_to_remove}<->{target_id_to_remove} (Method: {source_method})")
     try:
         num_nodes = graph_store_data['num_nodes']
         if not (0 <= source_id_to_remove < num_nodes and 0 <= target_id_to_remove < num_nodes):
-             status_message = f"Invalid node ID(s). Max is {num_nodes-1}."
-             clear_selection_output = None if source_method == 'selection' else selected_edge_data
-             return no_update, status_message, clear_selection_output
+            status_message = f"Invalid node ID(s). Max is {num_nodes-1}."
+            clear_selection_output = None if source_method == 'selection' else selected_edge_data
+            return no_update, status_message, clear_selection_output
         if source_id_to_remove == target_id_to_remove: return no_update, "Cannot remove self-loops.", selected_edge_data
+
         new_graph_data = copy.deepcopy(graph_store_data)
         edge_index_list = new_graph_data['edge_index']
         if not edge_index_list or not edge_index_list[0]:
-              status_message = f"Edge {source_id_to_remove}-{target_id_to_remove} not found (no edges)."
-              clear_selection_output = None if source_method == 'selection' else selected_edge_data
-              return no_update, status_message, clear_selection_output
+            status_message = f"Edge {source_id_to_remove}-{target_id_to_remove} not found (no edges)."
+            clear_selection_output = None if source_method == 'selection' else selected_edge_data
+            return no_update, status_message, clear_selection_output
+
         edge_index_tensor = torch.tensor(edge_index_list, dtype=torch.long)
         mask_forward = (edge_index_tensor[0] == source_id_to_remove) & (edge_index_tensor[1] == target_id_to_remove)
         mask_backward = (edge_index_tensor[0] == target_id_to_remove) & (edge_index_tensor[1] == source_id_to_remove)
@@ -923,6 +999,7 @@ def remove_edge_callback(n_clicks, source_input_str, target_input_str, selected_
             status_message = f"Edge {source_id_to_remove}-{target_id_to_remove} not found."
             clear_selection_output = None if source_method == 'selection' else selected_edge_data
             return no_update, status_message, clear_selection_output
+
         keep_mask = ~remove_mask
         new_edge_index = edge_index_tensor[:, keep_mask]
         new_graph_data['edge_index'] = new_edge_index.tolist()
@@ -930,7 +1007,8 @@ def remove_edge_callback(n_clicks, source_input_str, target_input_str, selected_
         print(status_message)
         clear_selection_output = None if source_method == 'selection' else selected_edge_data
         return new_graph_data, status_message, clear_selection_output
-    except Exception as e: error_message = f"Error removing edge: {e}"; print(error_message); clear_selection_output = None if source_method == 'selection' else selected_edge_data; return no_update, error_message, clear_selection_output
+    except Exception as e:
+        error_message = f"Error removing edge: {e}"; print(error_message); clear_selection_output = None if source_method == 'selection' else selected_edge_data; return no_update, error_message, clear_selection_output
 
 # --- Selection Callbacks ---
 @callback(
@@ -950,6 +1028,7 @@ def store_selected_node(tapNodeData, clickData, n_clicks_input, input_value, gra
     trigger = ctx.triggered_id
     print(f"Store selected node triggered by: {trigger}")
     selected_node_update, clear_edge_update, status_message, input_reset = no_update, no_update, no_update, no_update
+
     if trigger == 'graph-view' and tapNodeData and 'id' in tapNodeData:
         selected_node_update = {'id': tapNodeData['id']}; clear_edge_update = None; status_message = f"Selected Node {tapNodeData['id']} from graph."
         print(status_message)
@@ -973,6 +1052,7 @@ def store_selected_node(tapNodeData, clickData, n_clicks_input, input_value, gra
                 else: status_message = f"Error: Node ID {node_id_to_select} out of range (0 to {num_nodes - 1})."
             except (ValueError, TypeError): status_message = f"Error: Invalid input '{input_value}'. Enter integer ID."
             print(status_message)
+
     return selected_node_update, clear_edge_update, status_message, input_reset
 
 @callback(
@@ -989,7 +1069,7 @@ def store_selected_edge_graph(tapEdgeData):
 
 # --- Callback to Run GNNExplainer ---
 @callback(
-    Output('explanation-store', 'data'),
+    Output('explanation-store', 'data', allow_duplicate=True),
     Output('status-message-area', 'children', allow_duplicate=True),
     Input('selected-node-store', 'data'),
     Input('current-model-output-store', 'data'),
@@ -1003,8 +1083,12 @@ def run_gnn_explainer_callback(selected_node_data, model_output, graph_store_dat
     trigger = ctx.triggered_id
     print(f"GNNExplainer callback triggered by: {trigger}")
 
+    # This callback now only triggers when the selected node changes, which is what we want for auto-explanation.
+    if trigger != 'selected-node-store':
+        return no_update, no_update
+        
     if not selected_node_data or 'id' not in selected_node_data: return None, no_update
-    if not model_output or model_output.get('predictions') is None: return no_update, no_update # Need predictions for target
+    if not model_output or model_output.get('predictions') is None: return no_update, no_update
     if not graph_store_data or graph_store_data.get('num_nodes', 0) == 0: return None, "Graph data not loaded."
 
     try:
@@ -1013,13 +1097,11 @@ def run_gnn_explainer_callback(selected_node_data, model_output, graph_store_dat
         if not (0 <= selected_node_idx < num_nodes): return None, f"Invalid node ID {selected_node_idx}."
     except (ValueError, TypeError): return None, "Invalid node ID format."
 
-    # --- Get Target Prediction ---
     try:
         target_prediction_class = model_output['predictions'][selected_node_idx]
-        target = torch.tensor([target_prediction_class], device=device) # Create tensor for target
+        target = torch.tensor([target_prediction_class], device=device)
     except (IndexError, KeyError, TypeError):
         return None, f"Could not get prediction for Node {selected_node_idx} to use as target."
-
 
     status_message = f"Running GNNExplainer for Node {selected_node_idx} (Target Class: {target_prediction_class})..."
     print(status_message)
@@ -1035,19 +1117,10 @@ def run_gnn_explainer_callback(selected_node_data, model_output, graph_store_dat
     try:
         model.eval()
 
-        # 1. Instantiate the explanation algorithm (GNNExplainer)
         gnn_explainer_algorithm = GNNExplainer(
-            epochs=100,
-            lr=0.01,
-            coeffs={
-               "edge_size": 0.05,
-               "node_feat_size": 1.0,
-               "edge_ent": 1.0,
-               "node_feat_ent": 0.1,
-            }
+            epochs=100, lr=0.01,
+            coeffs={"edge_size": 0.05, "node_feat_size": 1.0, "edge_ent": 1.0, "node_feat_ent": 0.1}
         )
-
-        # 2. Configure the main Explainer
         explainer = Explainer(
             model=model,
             algorithm=gnn_explainer_algorithm,
@@ -1055,19 +1128,15 @@ def run_gnn_explainer_callback(selected_node_data, model_output, graph_store_dat
             node_mask_type='attributes',
             edge_mask_type='object',
             model_config=dict(
-                mode='multiclass_classification',
-                task_level='node',
-                return_type='log_probs', # ---> FIX: Use plural 'log_probs' <---
+                mode='multiclass_classification', task_level='node', return_type='log_probs',
             ),
         )
 
-        # 3. Generate the explanation by calling the Explainer instance
         explanation = explainer(x=x, edge_index=edge_index, target=target, index=selected_node_idx)
 
         print(f"GNNExplainer finished for Node {selected_node_idx}.")
         status_message = f"GNNExplainer explanation generated for Node {selected_node_idx}."
 
-        # Extract masks from the Explanation object
         node_feat_mask = explanation.get('node_feat_mask', None)
         edge_mask = explanation.get('edge_mask', None)
 
@@ -1084,6 +1153,61 @@ def run_gnn_explainer_callback(selected_node_data, model_output, graph_store_dat
         traceback.print_exc()
         return None, error_msg
 
+# --- NEW Callback to run CPA-IV ---
+@callback(
+    Output('cpa-iv-store', 'data', allow_duplicate=True),
+    Output('status-message-area', 'children', allow_duplicate=True),
+    Input('run-cpa-iv-button', 'n_clicks'),
+    State('selected-node-store', 'data'),
+    State('current-graph-store', 'data'),
+    State('model-dropdown', 'value'),
+    State('dataset-dropdown', 'value'),
+    prevent_initial_call=True
+)
+def run_cpa_iv_callback(n_clicks, selected_node_data, graph_store_data, model_type, dataset_name):
+    """Runs the CPA-IV method when the button is clicked."""
+    if n_clicks == 0: return no_update, no_update
+    if not selected_node_data or 'id' not in selected_node_data:
+        return None, "Please select a node first to run CPA-IV."
+    if not graph_store_data or graph_store_data.get('num_nodes', 0) == 0:
+        return None, "Graph data not loaded."
+
+    try:
+        selected_node_idx = int(selected_node_data['id'])
+    except (ValueError, TypeError):
+        return None, "Invalid node ID."
+
+    status_message = f"Running Causal Path Analysis (CPA-IV) for Node {selected_node_idx}..."
+    print(status_message)
+    
+    model = load_model(model_type, dataset_name, device)
+    if model is None:
+        return None, f"CPA-IV failed: Could not load model {model_type} for {dataset_name}."
+
+    try:
+        current_data = Data(
+            x=torch.tensor(graph_store_data['features'], dtype=torch.float),
+            edge_index=torch.tensor(graph_store_data['edge_index'], dtype=torch.long),
+            num_nodes=graph_store_data['num_nodes']
+        )
+    except Exception as e:
+        return None, f"CPA-IV failed: Error creating data object - {e}"
+
+    try:
+        causal_paths = run_cpa_iv(model, current_data, selected_node_idx, device, top_k=3, max_path_len=3)
+        if causal_paths:
+            status_message = f"CPA-IV finished. Found {len(causal_paths)} causal path(s) for Node {selected_node_idx}."
+            return causal_paths, status_message
+        else:
+            status_message = f"CPA-IV finished. No significant causal paths found for Node {selected_node_idx}."
+            return [], status_message
+    except Exception as e:
+        error_msg = f"Error during CPA-IV execution: {e}"
+        print(error_msg)
+        import traceback
+        traceback.print_exc()
+        return None, error_msg
+
 
 # --- Callback to Update ALL Visualizations ---
 @callback(
@@ -1094,11 +1218,13 @@ def run_gnn_explainer_callback(selected_node_data, model_output, graph_store_dat
     Output('attention-view', 'figure'),
     Output('neighborhood-info-view', 'children'),
     Output('reasoning-output', 'children'),
+    Output('cpa-iv-output', 'children'), # NEW output for CPA-IV results
     Input('current-model-output-store', 'data'),
     Input('selected-node-store', 'data'),
     Input('selected-edge-store', 'data'),
     Input('dim-reduction-dropdown', 'value'),
     Input('explanation-store', 'data'),
+    Input('cpa-iv-store', 'data'), # NEW input for CPA-IV results
     State('current-graph-store', 'data'),
     State('dataset-info-store', 'data'),
     State('model-dropdown', 'value'),
@@ -1106,7 +1232,7 @@ def run_gnn_explainer_callback(selected_node_data, model_output, graph_store_dat
     prevent_initial_call=True
 )
 def update_visualizations(model_output, selected_node_data, selected_edge_data,
-                          dim_reduction_method, explanation_data,
+                          dim_reduction_method, explanation_data, cpa_iv_data,
                           graph_store_data, dataset_info, model_type, dataset_name):
     """Updates all visualization components based on current state."""
     trigger = ctx.triggered_id
@@ -1118,16 +1244,18 @@ def update_visualizations(model_output, selected_node_data, selected_edge_data,
     default_attn_text = "Attention view (GAT only)."
     default_feature_text = "Select node for features. Importance shown after explanation."
     default_neighbor_text = "Select node for neighbors."
-    default_reasoning_text = "Select node for GNN explanation."
+    default_reasoning_text = "Select node to auto-run GNNExplainer."
+    default_cpa_iv_text = "Click 'Explain with Causal Paths' for a selected node."
 
     attn_fig = go.Figure(layout={'title': default_attn_text, 'xaxis': {'visible': False}, 'yaxis': {'visible': False}})
     feature_fig = go.Figure(layout={'title': default_feature_text, 'xaxis': {'visible': False}, 'yaxis': {'visible': False}})
     neighbor_info_content = default_neighbor_text
     reasoning_content = default_reasoning_text
+    cpa_iv_content = default_cpa_iv_text
 
     if graph_store_data is None or graph_store_data.get('num_nodes', 0) == 0:
         print("Update visualizations skipped: No graph data.")
-        return empty_elements, empty_fig, feature_fig, default_info_text, attn_fig, default_neighbor_text, default_reasoning_text
+        return empty_elements, empty_fig, feature_fig, default_info_text, attn_fig, default_neighbor_text, default_reasoning_text, default_cpa_iv_text
 
     try:
         current_data = Data(
@@ -1138,19 +1266,31 @@ def update_visualizations(model_output, selected_node_data, selected_edge_data,
         )
     except Exception as e:
         print(f"Error reconstructing graph data: {e}")
-        return empty_elements, empty_fig, feature_fig, "Error loading graph.", attn_fig, default_neighbor_text, "Error loading graph."
+        return empty_elements, empty_fig, feature_fig, "Error loading graph.", attn_fig, default_neighbor_text, "Error loading graph.", "Error loading graph."
+
+    # --- NEW: Process and display CPA-IV results ---
+    if cpa_iv_data is not None:
+        if isinstance(cpa_iv_data, list) and cpa_iv_data:
+            path_elements = []
+            for i, p_info in enumerate(cpa_iv_data):
+                path_str = " → ".join(map(str, p_info['path']))
+                score = p_info['score']
+                path_elements.append(html.P(f"Path {i+1}: {path_str} (Score: {score:.4f})"))
+            cpa_iv_content = html.Div(path_elements)
+        elif isinstance(cpa_iv_data, list) and not cpa_iv_data:
+            cpa_iv_content = "No influential causal paths were found."
 
     class_map = dataset_info.get('class_map', {}) if dataset_info else {}
     selected_node_id_str = selected_node_data.get('id') if selected_node_data else None
     predictions, embeddings, valid_model_output = None, None, False
     if model_output and model_output.get('predictions') is not None and model_output.get('embeddings') is not None:
-         try:
-             predictions_list, embeddings_list = model_output['predictions'], model_output['embeddings']
-             if len(predictions_list) == current_data.num_nodes and len(embeddings_list) == current_data.num_nodes:
-                 predictions, embeddings = torch.tensor(predictions_list), torch.tensor(embeddings_list)
-                 valid_model_output = True
-             else: print("Warning: Model output size mismatch.")
-         except Exception as e: print(f"Error processing model output: {e}")
+        try:
+            predictions_list, embeddings_list = model_output['predictions'], model_output['embeddings']
+            if len(predictions_list) == current_data.num_nodes and len(embeddings_list) == current_data.num_nodes:
+                predictions, embeddings = torch.tensor(predictions_list), torch.tensor(embeddings_list)
+                valid_model_output = True
+            else: print("Warning: Model output size mismatch.")
+        except Exception as e: print(f"Error processing model output: {e}")
 
     neighbor_ids, selected_node_idx = [], None
     if selected_node_id_str is not None:
@@ -1198,42 +1338,42 @@ def update_visualizations(model_output, selected_node_data, selected_edge_data,
             else: reasoning_parts.append(html.P("Feature importance mask N/A."))
 
             if edge_mask is not None:
-                 edge_index_np = current_data.edge_index.cpu().numpy()
-                 edge_scores = {}
-                 if len(edge_mask) == edge_index_np.shape[1]:
-                     for i in range(edge_index_np.shape[1]):
-                         u, v = edge_index_np[0, i], edge_index_np[1, i]; score = edge_mask[i]
-                         edge_pair = tuple(sorted((u,v))); edge_scores[edge_pair] = max(edge_scores.get(edge_pair, 0.0), score)
-                     connected_important_edges = []
-                     for (u, v), score in edge_scores.items():
-                         if (u == selected_node_idx or v == selected_node_idx) and score > 0.1:
-                             neighbor = v if u == selected_node_idx else u
-                             connected_important_edges.append((neighbor, score))
-                     connected_important_edges.sort(key=lambda item: item[1], reverse=True)
-                     top_k_edge = min(5, len(connected_important_edges))
-                     if top_k_edge > 0:
-                         edge_summary = ", ".join([f"Node {neighbor} ({score:.2f})" for neighbor, score in connected_important_edges[:top_k_edge]])
-                         reasoning_parts.append(html.P(f"Top {top_k_edge} Imp. Connections: {edge_summary}"))
-                     else: reasoning_parts.append(html.P("No connections found significantly important."))
-                 else:
-                     reasoning_parts.append(html.P(f"Edge mask length mismatch. Cannot display edge importance."))
-                     print(f"Warning: Edge mask length mismatch in update_visualizations.")
-                     if 'edge_mask' in explanation_masks: explanation_masks['edge_mask'] = None # Invalidate
+                edge_index_np = current_data.edge_index.cpu().numpy()
+                edge_scores = {}
+                if len(edge_mask) == edge_index_np.shape[1]:
+                    for i in range(edge_index_np.shape[1]):
+                        u, v = edge_index_np[0, i], edge_index_np[1, i]; score = edge_mask[i]
+                        edge_pair = tuple(sorted((u,v))); edge_scores[edge_pair] = max(edge_scores.get(edge_pair, 0.0), score)
+                    connected_important_edges = []
+                    for (u, v), score in edge_scores.items():
+                        if (u == selected_node_idx or v == selected_node_idx) and score > 0.1:
+                            neighbor = v if u == selected_node_idx else u
+                            connected_important_edges.append((neighbor, score))
+                    connected_important_edges.sort(key=lambda item: item[1], reverse=True)
+                    top_k_edge = min(5, len(connected_important_edges))
+                    if top_k_edge > 0:
+                        edge_summary = ", ".join([f"Node {neighbor} ({score:.2f})" for neighbor, score in connected_important_edges[:top_k_edge]])
+                        reasoning_parts.append(html.P(f"Top {top_k_edge} Imp. Connections: {edge_summary}"))
+                    else: reasoning_parts.append(html.P("No connections found significantly important."))
+                else:
+                    reasoning_parts.append(html.P(f"Edge mask length mismatch. Cannot display edge importance."))
+                    print(f"Warning: Edge mask length mismatch in update_visualizations.")
+                    if 'edge_mask' in explanation_masks: explanation_masks['edge_mask'] = None # Invalidate
             else: reasoning_parts.append(html.P("Edge importance mask N/A."))
             reasoning_content = html.Div(reasoning_parts)
         except Exception as e: print(f"Error processing explanation data: {e}"); reasoning_content = f"Error displaying explanation."; explanation_masks = None
     elif selected_node_idx is not None and trigger == 'explanation-store' and explanation_data is None:
         reasoning_content = f"Could not generate explanation for Node {selected_node_idx}."
 
-    cyto_elements = data_to_cytoscape(current_data, predictions, class_map, selected_node_id_str, selected_edge_data, neighbor_ids=neighbor_ids, explanation_masks=explanation_masks)
+    cyto_elements = data_to_cytoscape(current_data, predictions, class_map, selected_node_id_str, selected_edge_data, neighbor_ids=neighbor_ids, explanation_masks=explanation_masks, causal_paths=cpa_iv_data)
 
     if valid_model_output:
         embeddings_fig = plot_embeddings(embeddings, predictions, current_data.y, class_map, dim_reduction_method, selected_node_id_str)
     else:
         if current_data.num_nodes > 1:
-             dummy_embeddings = torch.randn(current_data.num_nodes, 16)
-             embeddings_fig = plot_embeddings(dummy_embeddings, None, current_data.y, class_map, dim_reduction_method, selected_node_id_str)
-             embeddings_fig.update_layout(title=f'Embeddings ({dim_reduction_method}) - Dummy Data')
+            dummy_embeddings = torch.randn(current_data.num_nodes, 16)
+            embeddings_fig = plot_embeddings(dummy_embeddings, None, current_data.y, class_map, dim_reduction_method, selected_node_id_str)
+            embeddings_fig.update_layout(title=f'Embeddings ({dim_reduction_method}) - Dummy Data')
         else: embeddings_fig = go.Figure(layout={'title': "Embeddings (N/A)"})
 
     if selected_node_idx is not None:
@@ -1272,7 +1412,7 @@ def update_visualizations(model_output, selected_node_data, selected_edge_data,
         except Exception as e: attn_fig = go.Figure(layout={'title': f'Error getting attention: {e}'}); print(f"Error getting attention: {e}"); import traceback; traceback.print_exc()
     elif model_type != 'GAT': attn_fig = go.Figure(layout={'title': 'Attention view (GAT only).'})
 
-    return cyto_elements, embeddings_fig, feature_fig, selected_info_content, attn_fig, neighbor_info_content, reasoning_content
+    return cyto_elements, embeddings_fig, feature_fig, selected_info_content, attn_fig, neighbor_info_content, reasoning_content, cpa_iv_content
 
 # --- Run App ---
 if __name__ == '__main__':
