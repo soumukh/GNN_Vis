@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 import dash
 from dash import dcc, html, Input, Output, State, callback, ctx, no_update, ALL
 import dash_cytoscape as cyto
@@ -208,14 +207,14 @@ def get_attention_weights(model, data, node_idx, device):
         return None
     try:
         if hasattr(model, 'inference'):
-             _, _, attention_output = model.inference(data, return_attention_weights=True)
+            _, _, attention_output = model.inference(data, return_attention_weights=True)
         else:
-             print("Warning: Trying to get attention from standard GAT forward.")
-             _, _, attention_output = model(data.x, data.edge_index, return_attention_weights=True)
+            print("Warning: Trying to get attention from standard GAT forward.")
+            _, _, attention_output = model(data.x, data.edge_index, return_attention_weights=True)
 
         if attention_output is None:
-             print("Model did not return attention weights.")
-             return None
+            print("Model did not return attention weights.")
+            return None
 
         edge_index_att, alpha_att = attention_output[-1]
         mask = edge_index_att[1] == node_idx
@@ -232,7 +231,7 @@ def get_attention_weights(model, data, node_idx, device):
 
 # --- CPA-IV Helper Function (NEW) ---
 @torch.no_grad()
-def run_cpa_iv(model, data, node_idx, device, top_k=3, max_path_len=3):
+def run_cpa_iv(model, data, node_idx, device, top_k=3, max_path_len=2):
     """
     Identifies causal paths influencing a node's prediction using the CPA-IV method.
     This function performs a simplified causal analysis by measuring the drop in the
@@ -478,6 +477,75 @@ def data_to_cytoscape(data, predictions=None, class_map=None, selected_node_id=N
     return nodes + edges
 
 
+# --- NEW: Helper function to create the focused CPA-IV graph ---
+def data_to_cpa_cytoscape(cpa_iv_data, predictions, class_map, selected_node_id):
+    """
+    Creates a focused Cytoscape graph showing only the nodes and edges from the causal paths.
+    """
+    if not cpa_iv_data or not isinstance(cpa_iv_data, list):
+        return []
+
+    nodes = set()
+    edges = set()
+    causal_nodes_rank = {} # {node_id: rank}
+    causal_edges_rank = {} # {(u, v): rank}
+
+    for i, p_info in enumerate(cpa_iv_data):
+        path = p_info['path']
+        rank = i + 1
+        for node_id in path:
+            nodes.add(node_id)
+            causal_nodes_rank[node_id] = min(rank, causal_nodes_rank.get(node_id, float('inf')))
+        for j in range(len(path) - 1):
+            u, v = path[j], path[j+1]
+            edge_tuple = tuple(sorted((u, v)))
+            edges.add(edge_tuple)
+            causal_edges_rank[edge_tuple] = min(rank, causal_edges_rank.get(edge_tuple, float('inf')))
+    
+    cyto_elements = []
+    color_palette = px.colors.qualitative.Plotly
+    default_color = '#808080'
+    
+    for node_id in nodes:
+        node_id_str = str(node_id)
+        node_data = {'id': node_id_str, 'label': f'Node {node_id}'}
+        node_classes = []
+        node_base_color = default_color
+
+        if predictions is not None and node_id < len(predictions):
+            pred_class = int(predictions[node_id])
+            node_base_color = color_palette[pred_class % len(color_palette)]
+            if class_map and pred_class in class_map:
+                node_data['label'] += f'\n({class_map[pred_class]})'
+        
+        if node_id_str == selected_node_id:
+            node_classes.append('selected')
+        
+        rank = causal_nodes_rank.get(node_id)
+        if rank:
+            node_classes.append(f'causal-path-node-{rank}')
+        
+        node_data['classes'] = ' '.join(node_classes)
+        cyto_elements.append({'data': node_data, 'style': {'background-color': node_base_color}})
+
+    edge_counter = 0
+    for u, v in edges:
+        u_str, v_str = str(u), str(v)
+        edge_data = {'id': f'cpa-edge-{edge_counter}', 'source': u_str, 'target': v_str}
+        edge_counter += 1
+        edge_classes = []
+
+        edge_tuple = tuple(sorted((u, v)))
+        rank = causal_edges_rank.get(edge_tuple)
+        if rank:
+            edge_classes.append(f'causal-path-edge-{rank}')
+            
+        edge_data['classes'] = ' '.join(edge_classes)
+        cyto_elements.append({'data': edge_data})
+
+    return cyto_elements
+
+
 def plot_embeddings(embeddings, predictions, true_labels=None, class_map=None, dim_reduction='TSNE', selected_node_id=None):
     """Generates Plotly scatter plot for node embeddings."""
     if embeddings is None: return go.Figure(layout={'title': "Embeddings (Not Available)", 'xaxis': {'visible': False}, 'yaxis': {'visible': False}})
@@ -614,6 +682,27 @@ app = dash.Dash(__name__, suppress_callback_exceptions=True,
                 prevent_initial_callbacks='initial_duplicate')
 server = app.server
 
+# Define shared stylesheet for all Cytoscape graphs
+SHARED_STYLESHEET = [
+    # Default styles
+    {'selector': 'node', 'style': { 'label': 'data(label)', 'font-size': '10px', 'text-valign': 'center', 'text-halign': 'center', 'background-color': '#808080', 'width': 15, 'height': 15, 'color': '#fff', 'text-outline-width': 2, 'text-outline-color': '#555', 'border-width': 0, 'shape': 'ellipse'}},
+    {'selector': 'edge', 'style': {'curve-style': 'bezier', 'target-arrow-shape': 'none', 'line-color': '#cccccc', 'target-arrow-color': '#cccccc', 'opacity': 0.5, 'width': 1.5 }},
+    # State-based styles
+    {'selector': 'node.selected', 'style': {'background-color': '#FFA500', 'width': 25, 'height': 25, 'border-color': '#FF0000', 'border-width': 3, 'shape': 'ellipse', 'z-index': 9999 }},
+    {'selector': 'node.neighbor', 'style': {'border-color': '#007bff', 'border-width': 3, 'border-style': 'dashed' }},
+    {'selector': 'edge.selected-edge', 'style': {'line-color': '#FF0000', 'target-arrow-color': '#FF0000', 'width': 3, 'opacity': 1.0, 'z-index': 9998 }},
+    # Explanation styles
+    {'selector': 'edge.explained-edge', 'style': { 'line-color': '#39FF14', 'target-arrow-color': '#39FF14', 'width': 4, 'opacity': 0.9, 'z-index': 9997 }},
+    # Causal Path Styles
+    {'selector': '.causal-path-node-1', 'style': {'background-color': '#FF69B4', 'shape': 'diamond', 'width': 30, 'height': 30, 'border-color': '#FF1493', 'border-width': 2, 'z-index': 10001}},
+    {'selector': '.causal-path-edge-1', 'style': {'line-color': '#FF69B4', 'width': 5, 'opacity': 1, 'z-index': 10000, 'curve-style': 'bezier', 'target-arrow-shape': 'triangle'}},
+    {'selector': '.causal-path-node-2', 'style': {'background-color': '#1E90FF', 'shape': 'diamond', 'width': 25, 'height': 25, 'border-color': '#4169E1', 'border-width': 2, 'z-index': 10001}},
+    {'selector': '.causal-path-edge-2', 'style': {'line-color': '#1E90FF', 'width': 4, 'opacity': 0.9, 'z-index': 9999, 'curve-style': 'bezier', 'target-arrow-shape': 'triangle'}},
+    {'selector': '.causal-path-node-3', 'style': {'background-color': '#ADFF2F', 'shape': 'diamond', 'width': 20, 'height': 20, 'border-color': '#7FFF00', 'border-width': 2, 'z-index': 10001}},
+    {'selector': '.causal-path-edge-3', 'style': {'line-color': '#ADFF2F', 'width': 3, 'opacity': 0.8, 'z-index': 9998, 'curve-style': 'bezier', 'target-arrow-shape': 'triangle'}},
+]
+
+
 # --- App Layout ---
 app.layout = html.Div([
     dcc.Store(id='current-graph-store'),
@@ -654,24 +743,7 @@ app.layout = html.Div([
                 id='graph-view',
                 layout={'name': 'cose', 'idealEdgeLength': 100, 'nodeOverlap': 20, 'refresh': 20, 'fit': True, 'padding': 30, 'randomize': False, 'componentSpacing': 100, 'nodeRepulsion': 400000, 'edgeElasticity': 100, 'nestingFactor': 5, 'gravity': 80, 'numIter': 1000, 'initialTemp': 200, 'coolingFactor': 0.95, 'minTemp': 1.0},
                 style={'width': '100%', 'height': '450px', 'border': '1px solid #ddd', 'borderRadius': '5px'},
-                stylesheet=[
-                    # Default styles
-                    {'selector': 'node', 'style': { 'label': 'data(label)', 'font-size': '10px', 'text-valign': 'center', 'text-halign': 'center', 'background-color': '#808080', 'width': 15, 'height': 15, 'color': '#fff', 'text-outline-width': 2, 'text-outline-color': '#555', 'border-width': 0, 'shape': 'ellipse'}},
-                    {'selector': 'edge', 'style': {'curve-style': 'bezier', 'target-arrow-shape': 'none', 'line-color': '#cccccc', 'target-arrow-color': '#cccccc', 'opacity': 0.5, 'width': 1.5 }},
-                    # State-based styles
-                    {'selector': 'node.selected', 'style': {'background-color': '#FFA500', 'width': 25, 'height': 25, 'border-color': '#FF0000', 'border-width': 3, 'shape': 'ellipse', 'z-index': 9999 }},
-                    {'selector': 'node.neighbor', 'style': {'border-color': '#007bff', 'border-width': 3, 'border-style': 'dashed' }},
-                    {'selector': 'edge.selected-edge', 'style': {'line-color': '#FF0000', 'target-arrow-color': '#FF0000', 'width': 3, 'opacity': 1.0, 'z-index': 9998 }},
-                    # Explanation styles
-                    {'selector': 'edge.explained-edge', 'style': { 'line-color': '#39FF14', 'target-arrow-color': '#39FF14', 'width': 4, 'opacity': 0.9, 'z-index': 9997 }},
-                    # --- NEW Causal Path Styles ---
-                    {'selector': '.causal-path-node-1', 'style': {'background-color': '#FF69B4', 'shape': 'diamond', 'width': 30, 'height': 30, 'border-color': '#FF1493', 'border-width': 2, 'z-index': 10001}},
-                    {'selector': '.causal-path-edge-1', 'style': {'line-color': '#FF69B4', 'width': 5, 'opacity': 1, 'z-index': 10000, 'curve-style': 'bezier', 'target-arrow-shape': 'triangle'}},
-                    {'selector': '.causal-path-node-2', 'style': {'background-color': '#1E90FF', 'shape': 'diamond', 'width': 25, 'height': 25, 'border-color': '#4169E1', 'border-width': 2, 'z-index': 10001}},
-                    {'selector': '.causal-path-edge-2', 'style': {'line-color': '#1E90FF', 'width': 4, 'opacity': 0.9, 'z-index': 9999, 'curve-style': 'bezier', 'target-arrow-shape': 'triangle'}},
-                    {'selector': '.causal-path-node-3', 'style': {'background-color': '#ADFF2F', 'shape': 'diamond', 'width': 20, 'height': 20, 'border-color': '#7FFF00', 'border-width': 2, 'z-index': 10001}},
-                    {'selector': '.causal-path-edge-3', 'style': {'line-color': '#ADFF2F', 'width': 3, 'opacity': 0.8, 'z-index': 9998, 'curve-style': 'bezier', 'target-arrow-shape': 'triangle'}},
-                ]
+                stylesheet=SHARED_STYLESHEET
             ),
             html.H3("Node Embeddings"),
             dcc.Dropdown(id='dim-reduction-dropdown', options=[{'label': 't-SNE', 'value': 'TSNE'}, {'label': 'PCA', 'value': 'PCA'}, {'label': 'UMAP', 'value': 'UMAP'} ], value='UMAP', clearable=False, style={'width': '100px', 'marginBottom': '10px'}),
@@ -686,9 +758,27 @@ app.layout = html.Div([
             html.Div(id='neighborhood-info-view', style={'border': '1px solid #ddd', 'borderRadius': '5px', 'padding': '10px', 'minHeight': '150px', 'maxHeight': '250px', 'overflowY': 'auto', 'marginBottom': '10px', 'backgroundColor': '#f9f9f9', 'fontSize': 'small'}),
             html.H3("GNN Explanation (Selected Node)"),
             html.Div(id='reasoning-output', style={'padding': '10px', 'marginTop': '5px', 'fontStyle': 'italic', 'color': '#333', 'border': '1px solid #e0e0e0', 'borderRadius': '5px', 'backgroundColor': '#fafafa', 'minHeight': '80px'}),
-            # --- NEW Causal Path Output ---
-            html.H3("Causal Path Explanation (CPA-IV)"),
-            html.Div(id='cpa-iv-output', style={'border': '1px solid #ddd', 'borderRadius': '5px', 'padding': '10px', 'minHeight': '80px', 'marginBottom': '10px', 'backgroundColor': '#f9f9f9', 'fontSize': 'small'}),
+            
+            # --- NEW CPA-IV Section with Graph and Text side-by-side ---
+            html.Div([
+                # Left Side: New Causal Path Graph
+                html.Div([
+                    html.H3("Causal Path Graph View"),
+                    cyto.Cytoscape(
+                        id='cpa-iv-graph-view',
+                        layout={'name': 'cose', 'fit': True, 'padding': 20},
+                        style={'width': '100%', 'height': '250px', 'border': '1px solid #ddd', 'borderRadius': '5px'},
+                        stylesheet=SHARED_STYLESHEET
+                    )
+                ], style={'width': '48%', 'display': 'inline-block', 'verticalAlign': 'top', 'paddingRight': '2%'}),
+
+                # Right Side: Existing Causal Path Text Output
+                html.Div([
+                    html.H3("Causal Path Explanation"),
+                    html.Div(id='cpa-iv-output', style={'border': '1px solid #ddd', 'borderRadius': '5px', 'padding': '10px', 'height': '250px', 'overflowY': 'auto', 'backgroundColor': '#f9f9f9', 'fontSize': 'small'}),
+                ], style={'width': '48%', 'display': 'inline-block', 'verticalAlign': 'top'})
+            ], style={'marginTop': '20px'}),
+
             html.H3("Attention Weights (GAT Only)"),
             dcc.Graph(id='attention-view', style={'height': '250px'})
         ], style={'width': '48%', 'display': 'inline-block', 'verticalAlign': 'top'})
@@ -1194,7 +1284,8 @@ def run_cpa_iv_callback(n_clicks, selected_node_data, graph_store_data, model_ty
         return None, f"CPA-IV failed: Error creating data object - {e}"
 
     try:
-        causal_paths = run_cpa_iv(model, current_data, selected_node_idx, device, top_k=3, max_path_len=3)
+        # --- MODIFIED: Changed max_path_len from 3 to 2 ---
+        causal_paths = run_cpa_iv(model, current_data, selected_node_idx, device, top_k=3, max_path_len=2)
         if causal_paths:
             status_message = f"CPA-IV finished. Found {len(causal_paths)} causal path(s) for Node {selected_node_idx}."
             return causal_paths, status_message
@@ -1218,13 +1309,14 @@ def run_cpa_iv_callback(n_clicks, selected_node_data, graph_store_data, model_ty
     Output('attention-view', 'figure'),
     Output('neighborhood-info-view', 'children'),
     Output('reasoning-output', 'children'),
-    Output('cpa-iv-output', 'children'), # NEW output for CPA-IV results
+    Output('cpa-iv-output', 'children'),
+    Output('cpa-iv-graph-view', 'elements'), # NEW output for the CPA graph
     Input('current-model-output-store', 'data'),
     Input('selected-node-store', 'data'),
     Input('selected-edge-store', 'data'),
     Input('dim-reduction-dropdown', 'value'),
     Input('explanation-store', 'data'),
-    Input('cpa-iv-store', 'data'), # NEW input for CPA-IV results
+    Input('cpa-iv-store', 'data'),
     State('current-graph-store', 'data'),
     State('dataset-info-store', 'data'),
     State('model-dropdown', 'value'),
@@ -1238,6 +1330,7 @@ def update_visualizations(model_output, selected_node_data, selected_edge_data,
     trigger = ctx.triggered_id
     print(f"\n--- Debug: update_visualizations triggered by: {trigger} ---")
 
+    # Default empty states
     empty_elements = []
     empty_fig = go.Figure(layout={'xaxis': {'visible': False}, 'yaxis': {'visible': False}, 'annotations': [{'text': 'N/A'}]})
     default_info_text = "Load data/model, then select a node/edge."
@@ -1247,15 +1340,17 @@ def update_visualizations(model_output, selected_node_data, selected_edge_data,
     default_reasoning_text = "Select node to auto-run GNNExplainer."
     default_cpa_iv_text = "Click 'Explain with Causal Paths' for a selected node."
 
+    # Initialize outputs
     attn_fig = go.Figure(layout={'title': default_attn_text, 'xaxis': {'visible': False}, 'yaxis': {'visible': False}})
     feature_fig = go.Figure(layout={'title': default_feature_text, 'xaxis': {'visible': False}, 'yaxis': {'visible': False}})
     neighbor_info_content = default_neighbor_text
     reasoning_content = default_reasoning_text
     cpa_iv_content = default_cpa_iv_text
+    cpa_cyto_elements = [] # NEW
 
     if graph_store_data is None or graph_store_data.get('num_nodes', 0) == 0:
         print("Update visualizations skipped: No graph data.")
-        return empty_elements, empty_fig, feature_fig, default_info_text, attn_fig, default_neighbor_text, default_reasoning_text, default_cpa_iv_text
+        return empty_elements, empty_fig, feature_fig, default_info_text, attn_fig, default_neighbor_text, default_reasoning_text, default_cpa_iv_text, cpa_cyto_elements
 
     try:
         current_data = Data(
@@ -1266,19 +1361,7 @@ def update_visualizations(model_output, selected_node_data, selected_edge_data,
         )
     except Exception as e:
         print(f"Error reconstructing graph data: {e}")
-        return empty_elements, empty_fig, feature_fig, "Error loading graph.", attn_fig, default_neighbor_text, "Error loading graph.", "Error loading graph."
-
-    # --- NEW: Process and display CPA-IV results ---
-    if cpa_iv_data is not None:
-        if isinstance(cpa_iv_data, list) and cpa_iv_data:
-            path_elements = []
-            for i, p_info in enumerate(cpa_iv_data):
-                path_str = " → ".join(map(str, p_info['path']))
-                score = p_info['score']
-                path_elements.append(html.P(f"Path {i+1}: {path_str} (Score: {score:.4f})"))
-            cpa_iv_content = html.Div(path_elements)
-        elif isinstance(cpa_iv_data, list) and not cpa_iv_data:
-            cpa_iv_content = "No influential causal paths were found."
+        return empty_elements, empty_fig, feature_fig, "Error loading graph.", attn_fig, default_neighbor_text, "Error loading graph.", "Error loading graph.", cpa_cyto_elements
 
     class_map = dataset_info.get('class_map', {}) if dataset_info else {}
     selected_node_id_str = selected_node_data.get('id') if selected_node_data else None
@@ -1292,127 +1375,140 @@ def update_visualizations(model_output, selected_node_data, selected_edge_data,
             else: print("Warning: Model output size mismatch.")
         except Exception as e: print(f"Error processing model output: {e}")
 
+    # Process CPA-IV text output
+    if cpa_iv_data is not None:
+        if isinstance(cpa_iv_data, list) and cpa_iv_data:
+            path_elements = []
+            for i, p_info in enumerate(cpa_iv_data):
+                path_str = " → ".join(map(str, p_info['path']))
+                score = p_info['score']
+                path_elements.append(html.P(f"Path {i+1}: {path_str} (Score: {score:.4f})"))
+            cpa_iv_content = html.Div(path_elements)
+        elif isinstance(cpa_iv_data, list) and not cpa_iv_data:
+            cpa_iv_content = "No influential causal paths were found."
+
+    # Process node selection and neighborhood
     neighbor_ids, selected_node_idx = [], None
     if selected_node_id_str is not None:
         try:
             node_idx_int = int(selected_node_id_str)
             if 0 <= node_idx_int < current_data.num_nodes:
                 selected_node_idx = node_idx_int
+                # ... (neighbor finding logic - unchanged)
                 edge_index = current_data.edge_index
                 mask_source = edge_index[0] == selected_node_idx; mask_target = edge_index[1] == selected_node_idx
                 neighbors_from_source = edge_index[1][mask_source].tolist(); neighbors_from_target = edge_index[0][mask_target].tolist()
                 all_neighbors = set(neighbors_from_source + neighbors_from_target)
                 all_neighbors.discard(selected_node_idx)
                 neighbor_ids = sorted(list(all_neighbors))
+                # ... (neighbor details display - unchanged)
                 neighbor_details = []
-                has_true_labels = hasattr(current_data, 'y') and current_data.y is not None
-                has_predictions = predictions is not None
                 if neighbor_ids:
-                    for neighbor_idx_int in neighbor_ids:
-                        if 0 <= neighbor_idx_int < current_data.num_nodes:
+                        for neighbor_idx_int in neighbor_ids:
                             true_label = "N/A"; pred_label = "N/A"
-                            if has_true_labels and neighbor_idx_int < len(current_data.y): n_true_class = int(current_data.y[neighbor_idx_int].item()); true_label = class_map.get(n_true_class, f"C{n_true_class}") if n_true_class != -1 else "N/A"
-                            if has_predictions and neighbor_idx_int < len(predictions): n_pred_class = int(predictions[neighbor_idx_int].item()); pred_label = class_map.get(n_pred_class, f"C{n_pred_class}")
+                            if current_data.y is not None and neighbor_idx_int < len(current_data.y): n_true_class = int(current_data.y[neighbor_idx_int].item()); true_label = class_map.get(n_true_class, f"C{n_true_class}") if n_true_class != -1 else "N/A"
+                            if valid_model_output and neighbor_idx_int < len(predictions): n_pred_class = int(predictions[neighbor_idx_int].item()); pred_label = class_map.get(n_pred_class, f"C{n_pred_class}")
                             neighbor_details.append(html.Li(f"Node {neighbor_idx_int}: True={true_label}, Pred={pred_label}"))
-                        else: neighbor_details.append(html.Li(f"Node {neighbor_idx_int}: Invalid!"))
-                    neighbor_info_content = [html.Strong(f"Neighbors of Node {selected_node_idx} ({len(neighbor_ids)}):"), html.Ul(neighbor_details)]
+                        neighbor_info_content = [html.Strong(f"Neighbors of Node {selected_node_idx} ({len(neighbor_ids)}):"), html.Ul(neighbor_details)]
                 else: neighbor_info_content = f"Node {selected_node_idx} has no neighbors."
+
             else: neighbor_info_content = f"Invalid node ID {selected_node_id_str}."; selected_node_id_str = None; neighbor_ids = []
         except Exception as e: print(f"Error processing neighbors: {e}"); neighbor_info_content = "Error analyzing neighbors."; selected_node_id_str = None; neighbor_ids = []
 
+    # Process GNNExplainer data
     explanation_masks, node_feat_mask, edge_mask = None, None, None
     if selected_node_idx is not None and explanation_data and isinstance(explanation_data, dict):
+        # ... (explanation processing logic - unchanged)
         try:
-            node_feat_mask_list = explanation_data.get('node_feat_mask')
-            edge_mask_list = explanation_data.get('edge_mask')
-            explanation_masks = {}
-            if node_feat_mask_list is not None: node_feat_mask = np.array(node_feat_mask_list); explanation_masks['node_feat_mask'] = node_feat_mask
-            if edge_mask_list is not None: edge_mask = np.array(edge_mask_list); explanation_masks['edge_mask'] = edge_mask
-
-            reasoning_parts = [html.Strong(f"GNNExplainer Summary for Node {selected_node_idx}:")]
-            if node_feat_mask is not None:
-                num_features = len(node_feat_mask); top_k_feat = min(5, num_features)
-                important_indices = np.argsort(node_feat_mask)[::-1][:top_k_feat]
-                feat_summary = ", ".join([f"F_{idx} ({node_feat_mask[idx]:.2f})" for idx in important_indices if node_feat_mask[idx] > 0.01])
-                reasoning_parts.append(html.P(f"Top {top_k_feat} Imp. Features: {feat_summary}" if feat_summary else "No features found significantly important."))
-            else: reasoning_parts.append(html.P("Feature importance mask N/A."))
-
-            if edge_mask is not None:
-                edge_index_np = current_data.edge_index.cpu().numpy()
-                edge_scores = {}
-                if len(edge_mask) == edge_index_np.shape[1]:
+                node_feat_mask_list = explanation_data.get('node_feat_mask'); edge_mask_list = explanation_data.get('edge_mask')
+                explanation_masks = {};
+                if node_feat_mask_list is not None: node_feat_mask = np.array(node_feat_mask_list); explanation_masks['node_feat_mask'] = node_feat_mask
+                if edge_mask_list is not None: edge_mask = np.array(edge_mask_list); explanation_masks['edge_mask'] = edge_mask
+                reasoning_parts = [html.Strong(f"GNNExplainer Summary for Node {selected_node_idx}:")]
+                if node_feat_mask is not None:
+                    num_features = len(node_feat_mask); top_k_feat = min(5, num_features)
+                    important_indices = np.argsort(node_feat_mask)[::-1][:top_k_feat]
+                    feat_summary = ", ".join([f"F_{idx} ({node_feat_mask[idx]:.2f})" for idx in important_indices if node_feat_mask[idx] > 0.01])
+                    reasoning_parts.append(html.P(f"Top Imp. Features: {feat_summary}" if feat_summary else "No significant features."))
+                if edge_mask is not None and len(edge_mask) == current_data.edge_index.shape[1]:
+                    edge_index_np = current_data.edge_index.cpu().numpy()
+                    edge_scores = {}
                     for i in range(edge_index_np.shape[1]):
-                        u, v = edge_index_np[0, i], edge_index_np[1, i]; score = edge_mask[i]
+                        u, v, score = edge_index_np[0, i], edge_index_np[1, i], edge_mask[i]
                         edge_pair = tuple(sorted((u,v))); edge_scores[edge_pair] = max(edge_scores.get(edge_pair, 0.0), score)
-                    connected_important_edges = []
-                    for (u, v), score in edge_scores.items():
-                        if (u == selected_node_idx or v == selected_node_idx) and score > 0.1:
-                            neighbor = v if u == selected_node_idx else u
-                            connected_important_edges.append((neighbor, score))
-                    connected_important_edges.sort(key=lambda item: item[1], reverse=True)
+                    connected_important_edges = sorted([(v if u == selected_node_idx else u, s) for (u, v), s in edge_scores.items() if (u == selected_node_idx or v == selected_node_idx) and s > 0.1], key=lambda item: item[1], reverse=True)
                     top_k_edge = min(5, len(connected_important_edges))
                     if top_k_edge > 0:
-                        edge_summary = ", ".join([f"Node {neighbor} ({score:.2f})" for neighbor, score in connected_important_edges[:top_k_edge]])
-                        reasoning_parts.append(html.P(f"Top {top_k_edge} Imp. Connections: {edge_summary}"))
-                    else: reasoning_parts.append(html.P("No connections found significantly important."))
-                else:
-                    reasoning_parts.append(html.P(f"Edge mask length mismatch. Cannot display edge importance."))
-                    print(f"Warning: Edge mask length mismatch in update_visualizations.")
-                    if 'edge_mask' in explanation_masks: explanation_masks['edge_mask'] = None # Invalidate
-            else: reasoning_parts.append(html.P("Edge importance mask N/A."))
-            reasoning_content = html.Div(reasoning_parts)
-        except Exception as e: print(f"Error processing explanation data: {e}"); reasoning_content = f"Error displaying explanation."; explanation_masks = None
-    elif selected_node_idx is not None and trigger == 'explanation-store' and explanation_data is None:
-        reasoning_content = f"Could not generate explanation for Node {selected_node_idx}."
+                        edge_summary = ", ".join([f"Node {n} ({s:.2f})" for n, s in connected_important_edges[:top_k_edge]])
+                        reasoning_parts.append(html.P(f"Top Imp. Connections: {edge_summary}"))
+                    else: reasoning_parts.append(html.P("No significant connections found."))
+                reasoning_content = html.Div(reasoning_parts)
+        except Exception as e: print(f"Error processing explanation: {e}"); reasoning_content = "Error displaying explanation."; explanation_masks = None
 
+    # --- Generate Visualizations ---
+    # 1. Main Graph View
     cyto_elements = data_to_cytoscape(current_data, predictions, class_map, selected_node_id_str, selected_edge_data, neighbor_ids=neighbor_ids, explanation_masks=explanation_masks, causal_paths=cpa_iv_data)
 
+    # 2. Embeddings View
     if valid_model_output:
         embeddings_fig = plot_embeddings(embeddings, predictions, current_data.y, class_map, dim_reduction_method, selected_node_id_str)
     else:
-        if current_data.num_nodes > 1:
-            dummy_embeddings = torch.randn(current_data.num_nodes, 16)
-            embeddings_fig = plot_embeddings(dummy_embeddings, None, current_data.y, class_map, dim_reduction_method, selected_node_id_str)
-            embeddings_fig.update_layout(title=f'Embeddings ({dim_reduction_method}) - Dummy Data')
-        else: embeddings_fig = go.Figure(layout={'title': "Embeddings (N/A)"})
+        embeddings_fig = plot_embeddings(torch.randn(current_data.num_nodes, 16), None, current_data.y, class_map, dim_reduction_method, selected_node_id_str)
+        embeddings_fig.update_layout(title=f'Embeddings ({dim_reduction_method}) - Using Dummy Data')
 
+    # 3. Feature Histogram
     if selected_node_idx is not None:
-        node_features = current_data.x[selected_node_idx]
-        current_node_feat_mask = explanation_masks.get('node_feat_mask') if explanation_masks else None
-        feature_fig = plot_feature_histogram(node_features, selected_node_id_str, feature_mask=current_node_feat_mask)
+        feature_fig = plot_feature_histogram(current_data.x[selected_node_idx], selected_node_id_str, feature_mask=(explanation_masks.get('node_feat_mask') if explanation_masks else None))
 
+    # --- MODIFIED: 4. Selected Info Panel ---
     selected_info_content = []
     if selected_node_idx is not None:
         selected_info_content.append(html.Strong(f"Selected Node: {selected_node_idx}"))
-        pred_label, true_label = "N/A", "N/A"
-        if valid_model_output and selected_node_idx < len(predictions): pred_class = int(predictions[selected_node_idx].item()); pred_label = class_map.get(pred_class, f'Class {pred_class}')
-        if hasattr(current_data, 'y') and current_data.y is not None and selected_node_idx < len(current_data.y):
-            true_class = int(current_data.y[selected_node_idx].item())
-            true_label = class_map.get(true_class, f'Class {true_class}') if true_class != -1 else "N/A (New)"
-        selected_info_content.append(html.P(f"Predicted Class: {pred_label}"))
-        selected_info_content.append(html.P(f"True Class: {true_label}"))
-    elif selected_edge_data: selected_info_content.append(html.Strong(f"Selected Edge: {selected_edge_data.get('source', '?')} -> {selected_edge_data.get('target', '?')}"))
-    else: selected_info_content = default_info_text
+        
+        # Display Predicted Class
+        if valid_model_output:
+            pred_class_idx = int(predictions[selected_node_idx].item())
+            pred_label = class_map.get(pred_class_idx, f"Class {pred_class_idx}")
+            selected_info_content.append(html.P(f"Predicted: {pred_label} (ID: {pred_class_idx})"))
+        else:
+            selected_info_content.append(html.P("Predicted: N/A"))
 
+        # Display True Class
+        if current_data.y is not None and selected_node_idx < len(current_data.y):
+            true_class_idx = int(current_data.y[selected_node_idx].item())
+            if true_class_idx != -1:
+                true_label = class_map.get(true_class_idx, f"Class {true_class_idx}")
+                selected_info_content.append(html.P(f"True Label: {true_label} (ID: {true_class_idx})"))
+            else:
+                selected_info_content.append(html.P("True Label: N/A (Unlabeled Node)"))
+        else:
+            selected_info_content.append(html.P("True Label: N/A"))
+            
+    elif selected_edge_data:
+        selected_info_content.append(html.Strong(f"Selected Edge: {selected_edge_data.get('source', '?')} -> {selected_edge_data.get('target', '?')}"))
+    else:
+        selected_info_content = default_info_text
+    
+    # 5. Attention View (GAT Only)
     if model_type == 'GAT' and selected_node_idx is not None and valid_model_output:
         try:
             gat_model = load_model(model_type, dataset_name, device)
             if gat_model:
                 att_data = get_attention_weights(gat_model, current_data, selected_node_idx, device)
                 if att_data:
-                    neighbor_indices_att, attention_scores = att_data
-                    if len(neighbor_indices_att) > 0:
-                        att_df = pd.DataFrame({'Neighbor Node': [str(n) for n in neighbor_indices_att], 'Attention Score': attention_scores})
-                        att_df = att_df.sort_values('Attention Score', ascending=False).head(20)
-                        attn_fig = px.bar(att_df, x='Neighbor Node', y='Attention Score', title=f'Attention Scores to Node {selected_node_idx} (Top 20)', labels={'Attention Score': 'Attention'})
-                        attn_fig.update_layout(xaxis_title="Source Neighbor Node", yaxis_title="Attention Score", title_font_size=14)
-                    else: attn_fig = go.Figure(layout={'title': f'Node {selected_node_idx} has no incoming attention'})
+                    att_df = pd.DataFrame({'Neighbor Node': [str(n) for n in att_data[0]], 'Attention Score': att_data[1]}).sort_values('Attention Score', ascending=False).head(20)
+                    attn_fig = px.bar(att_df, x='Neighbor Node', y='Attention Score', title=f'Attention Scores to Node {selected_node_idx} (Top 20)')
                 else: attn_fig = go.Figure(layout={'title': 'Could not retrieve attention weights.'})
-            else: attn_fig = go.Figure(layout={'title': 'GAT Model could not be loaded.'})
-        except Exception as e: attn_fig = go.Figure(layout={'title': f'Error getting attention: {e}'}); print(f"Error getting attention: {e}"); import traceback; traceback.print_exc()
-    elif model_type != 'GAT': attn_fig = go.Figure(layout={'title': 'Attention view (GAT only).'})
+        except Exception as e: attn_fig = go.Figure(layout={'title': f'Error getting attention: {e}'}); print(f"Error getting attention: {e}")
 
-    return cyto_elements, embeddings_fig, feature_fig, selected_info_content, attn_fig, neighbor_info_content, reasoning_content, cpa_iv_content
+    # --- NEW: 6. Causal Path Graph View ---
+    if cpa_iv_data:
+        cpa_predictions = predictions.tolist() if predictions is not None else None
+        cpa_cyto_elements = data_to_cpa_cytoscape(cpa_iv_data, cpa_predictions, class_map, selected_node_id_str)
+
+
+    return cyto_elements, embeddings_fig, feature_fig, selected_info_content, attn_fig, neighbor_info_content, reasoning_content, cpa_iv_content, cpa_cyto_elements
+
 
 # --- Run App ---
 if __name__ == '__main__':
