@@ -11,4 +11,4 @@ plotly
 scikit-learn
 pynvml
 cugraph
-dash-extensions
+dash-extensions 
