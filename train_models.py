@@ -1,11 +1,3 @@
-# -*- coding: utf-8 -*-
-"""
-train_models.py
-
-This script trains GCN and GAT models on specified datasets (Cora, CiteSeer).
-
-This script should be run after 'preprocess_datasets.py'.
-"""
 import torch
 import torch.nn.functional as F
 import torch.optim as optim
@@ -20,39 +12,36 @@ import time
 MODEL_DIR = 'models'
 DATA_DIR = 'data'
 PROCESSED_DATA_DIR = os.path.join(DATA_DIR, 'processed')
-
 DATASETS_TO_TRAIN = ['Cora', 'CiteSeer']
 MODELS_TO_TRAIN = ['GCN', 'GAT']
 
 # --- General Training Hyperparameters ---
-# Increased epochs to give the model ample time to converge with early stopping.
+
 EPOCHS = 500
-# Patience for early stopping is set to a reasonable value to avoid premature termination.
+
 EARLY_STOPPING_PATIENCE = 50
 
 # --- Model-Specific Hyperparameters ---
-# These have been carefully tuned for each dataset and model to boost performance.
-# GCN: Using smaller hidden layers to prevent overfitting and improve generalization.
+
 GCN_CONFIG = {
     'Cora': {'lr': 0.01, 'weight_decay': 5e-4, 'hidden_channels': 32, 'dropout_rate': 0.5},
     'CiteSeer': {'lr': 0.01, 'weight_decay': 0.01, 'hidden_channels': 32, 'dropout_rate': 0.5}
 }
 
-# GAT: Using the standard, high-performing configuration for both datasets.
-# The combination of 8 heads and 8 hidden channels is known to work well.
+
 GAT_CONFIG = {
     'Cora': {'lr': 0.005, 'weight_decay': 5e-4, 'hidden_channels': 8, 'heads': 8, 'dropout_rate': 0.6},
     'CiteSeer': {'lr': 0.005, 'weight_decay': 5e-4, 'hidden_channels': 8, 'heads': 8, 'dropout_rate': 0.6}
 }
 
-# --- GPU/CPU Device Setup ---
+# --- GPU Device Setup ---
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Using device: {device}")
 if torch.cuda.is_available():
     print(f"Device name: {torch.cuda.get_device_name(0)}")
 
 # --- Path Management ---
-# Resolving absolute paths for robust execution.
+
 script_dir = os.path.dirname(os.path.abspath(__file__)) if '__file__' in locals() else os.getcwd()
 model_abs_dir = os.path.join(script_dir, MODEL_DIR)
 data_abs_dir = os.path.join(script_dir, DATA_DIR)
@@ -62,7 +51,7 @@ os.makedirs(model_abs_dir, exist_ok=True)
 os.makedirs(data_abs_dir, exist_ok=True)
 os.makedirs(processed_data_abs_dir, exist_ok=True)
 
-# --- Model Definitions (Consistent Two-Layer Architecture) ---
+# --- Model Definitions ---
 
 class GCNNet(torch.nn.Module):
     """A standard two-layer GCN model."""
@@ -76,7 +65,7 @@ class GCNNet(torch.nn.Module):
         self.init_args = {'hidden_channels': hidden_channels, 'dropout_rate': dropout_rate}
 
     def forward(self, x, edge_index):
-        # **FIX**: Use F.relu() for applying the activation function.
+        #  F.relu() for applying the activation function.
         x = F.relu(self.conv1(x, edge_index))
         x = F.dropout(x, p=self.dropout_rate, training=self.training)
         x = self.conv2(x, edge_index)
@@ -86,7 +75,7 @@ class GATNet(torch.nn.Module):
     """A standard two-layer GAT model."""
     def __init__(self, in_channels, hidden_channels, out_channels, heads=8, dropout_rate=0.6):
         super().__init__()
-        # Dropout is applied at each GAT layer as per the original paper.
+        # Dropout is applied at each GAT layer 
         self.conv1 = GATConv(in_channels, hidden_channels, heads=heads, dropout=dropout_rate)
         # The second layer uses a single head and no concatenation for the final output.
         self.conv2 = GATConv(hidden_channels * heads, out_channels, heads=1, concat=False, dropout=dropout_rate)
@@ -95,9 +84,7 @@ class GATNet(torch.nn.Module):
         self.init_args = {'hidden_channels': hidden_channels, 'heads': heads, 'dropout_rate': dropout_rate}
 
     def forward(self, x, edge_index):
-        # Dropout on input features is a common regularization technique for GATs.
         x = F.dropout(x, p=self.dropout_rate, training=self.training)
-        # **FIX**: Use F.elu() for applying the activation function.
         x = F.elu(self.conv1(x, edge_index))
         x = F.dropout(x, p=self.dropout_rate, training=self.training)
         x = self.conv2(x, edge_index)
@@ -124,7 +111,6 @@ def load_training_dataset(name, root_dir, processed_dir):
     processed_file_path = os.path.join(processed_dir, f"{name}_processed.pt")
     if os.path.exists(processed_file_path):
         try:
-            # Note: weights_only=False is necessary if the .pt file contains more than just tensors.
             loaded_obj = torch.load(processed_file_path, map_location='cpu', weights_only=False)
             print(f"    Loaded from pre-processed file: {processed_file_path}")
             return PreprocessedDatasetWrapper(loaded_obj)
@@ -183,24 +169,21 @@ if __name__ == '__main__':
             
             config = (GCN_CONFIG if model_type == 'GCN' else GAT_CONFIG)[dataset_name]
             
-            # Separate model hyperparams from optimizer hyperparams.
-            # Create a new dict with only the parameters needed by the model's __init__ method.
             model_params = {k: v for k, v in config.items() if k not in ['lr', 'weight_decay']}
 
             if model_type == 'GCN':
                 model = GCNNet(in_channels=dataset.num_node_features,
                                out_channels=dataset.num_classes,
-                               **model_params) # Pass only the relevant params
+                               **model_params) 
             elif model_type == 'GAT':
                 model = GATNet(in_channels=dataset.num_node_features,
                                out_channels=dataset.num_classes,
-                               **model_params) # Pass only the relevant params
+                               **model_params) 
             else:
                 print(f"    ERROR: Model type '{model_type}' not recognized. Skipping.")
                 continue
 
             model = model.to(device)
-            # Optimizer is still configured using the full config dict.
             optimizer = optim.Adam(model.parameters(), lr=config['lr'], weight_decay=config['weight_decay'])
             scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=0.7, patience=15, min_lr=1e-6)
 
@@ -217,7 +200,6 @@ if __name__ == '__main__':
 
                 if val_acc > best_val_acc:
                     best_val_acc = val_acc
-                    # Save the model state on CPU to avoid GPU memory issues.
                     best_model_state = {k: v.cpu() for k, v in model.state_dict().items()}
                     epochs_no_improve = 0
                 else:
@@ -244,10 +226,10 @@ if __name__ == '__main__':
             model_filename = f"{model_type}_{dataset_name}_tuned.pkl"
             model_save_path = os.path.join(model_abs_dir, model_filename)
             
-            # Saving both state_dict and init_args for robust model loading later.
+           
             save_package = (model.state_dict(), model.init_args)
             with open(model_save_path, 'wb') as f:
-                pickle.dump(save_package, f) # Using pickle as requested.
+                pickle.dump(save_package, f) # Using pickle 
             print(f"    Model saved to: {model_save_path}")
             
             end_time = time.time()
