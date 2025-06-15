@@ -2,13 +2,12 @@ import dash
 from dash import dcc, html, Input, Output, State, callback, ctx, no_update, ALL
 import dash_cytoscape as cyto
 import plotly.express as px
-import plotly.graph_objects as go # For histogram and empty figures
+import plotly.graph_objects as go 
 
 import torch
 import torch.nn.functional as F
 from torch_geometric.datasets import Planetoid
 from torch_geometric.nn import GCNConv, GATConv
-# ---> Correct Import Path for Explainer framework <---
 from torch_geometric.explain import Explainer, GNNExplainer
 from torch_geometric.data import Data
 from torch_geometric.utils import to_networkx, from_networkx, remove_self_loops, add_self_loops, k_hop_subgraph
@@ -21,20 +20,19 @@ import umap.umap_ as umap
 import numpy as np
 import pickle
 import os
-import copy # For deep copying model state
+import copy 
 import warnings
 
-warnings.filterwarnings("ignore", category=UserWarning) # Suppress some warnings
+warnings.filterwarnings("ignore", category=UserWarning) 
 
 # --- Global Variables / Setup ---
-MODEL_DIR = 'models' # Directory where trained models are saved
-DATA_DIR = 'data'    # Directory where datasets are stored
+MODEL_DIR = 'models'
+DATA_DIR = 'data'    
 DEFAULT_DATASET = 'Cora'
 DEFAULT_MODEL = 'GCN'
-# --- AMENDED: Restrict datasets to Cora and CiteSeer ---
 AVAILABLE_DATASETS = ['Cora', 'CiteSeer']
 AVAILABLE_MODELS = ['GCN', 'GAT']
-NODE_DIM_REDUCTION = 'TSNE' # 'PCA', 'TSNE', or 'UMAP'
+NODE_DIM_REDUCTION = 'TSNE' 
 
 # --- GPU Setup ---
 # Check for CUDA availability and set the device
@@ -45,24 +43,23 @@ else:
     device = torch.device('cpu')
     print("CUDA not available. Using CPU.")
 
-# Ensure model and data directories exist
+# Ensuring model and data directories exist
 os.makedirs(MODEL_DIR, exist_ok=True)
 os.makedirs(DATA_DIR, exist_ok=True)
 
-# --- Model Definitions (Must match the ones in the training script) ---
+# --- Model Definitions  ---
 class GCNNet(torch.nn.Module):
-    """Basic GCN Network Definition."""
     def __init__(self, in_channels, hidden_channels, out_channels):
         super().__init__()
         self.conv1 = GCNConv(in_channels, hidden_channels)
         self.conv2 = GCNConv(hidden_channels, out_channels)
-        self.init_args = {'hidden_channels': hidden_channels} # Store args
+        self.init_args = {'hidden_channels': hidden_channels}
 
-    def forward(self, x, edge_index, **kwargs): # Accept potential extra kwargs from Explainer
+    def forward(self, x, edge_index, **kwargs): 
         x = self.conv1(x, edge_index)
         x = F.relu(x)
         x = self.conv2(x, edge_index)
-        return F.log_softmax(x, dim=1) # Return only scores for explainer
+        return F.log_softmax(x, dim=1) 
 
     def inference(self, data):
         x, edge_index = data.x, data.edge_index
@@ -74,16 +71,15 @@ class GCNNet(torch.nn.Module):
 
 
 class GATNet(torch.nn.Module):
-    """Basic GAT Network Definition."""
     def __init__(self, in_channels, hidden_channels, out_channels, heads=8):
         super().__init__()
         self.conv1 = GATConv(in_channels, hidden_channels, heads=heads, dropout=0.6)
         num_heads_out = 1
         self.conv2 = GATConv(hidden_channels * heads, out_channels, heads=num_heads_out,
                              concat=False, dropout=0.6)
-        self.init_args = {'hidden_channels': hidden_channels, 'heads': heads} # Store args
+        self.init_args = {'hidden_channels': hidden_channels, 'heads': heads} 
 
-    def forward(self, x, edge_index, **kwargs): # Accept potential extra kwargs from Explainer
+    def forward(self, x, edge_index, **kwargs): 
         x, _ = self.conv1(x, edge_index, return_attention_weights=False)
         x = F.elu(x)
         x, _ = self.conv2(x, edge_index, return_attention_weights=False)
@@ -112,7 +108,6 @@ def load_dataset(name):
         base_data_dir = os.path.join(script_dir, DATA_DIR)
         path = os.path.join(base_data_dir, name)
         print(f"App: Attempting to load dataset '{name}'...")
-        # --- AMENDED: Simplified to only load from available Planetoid datasets ---
         if name in AVAILABLE_DATASETS:
             dataset = Planetoid(root=base_data_dir, name=name)
             print(f"App: Planetoid dataset '{name}' loaded successfully.")
@@ -229,32 +224,15 @@ def get_attention_weights(model, data, node_idx, device):
         traceback.print_exc()
         return None
 
-# --- CPA-IV Helper Function (NEW) ---
+# --- CPA-IV Helper Function  ---
 @torch.no_grad()
 def run_cpa_iv(model, data, node_idx, device, top_k=3, max_path_len=2):
-    """
-    Identifies causal paths influencing a node's prediction using the CPA-IV method.
-    This function performs a simplified causal analysis by measuring the drop in the
-    prediction probability of the original class when a path is removed.
-
-    Args:
-        model: The trained GNN model.
-        data: The full PyG Data object.
-        node_idx: The index of the node to explain.
-        device: The torch device to run on.
-        top_k (int): The number of top causal paths to return.
-        max_path_len (int): The maximum length of paths to consider.
-
-    Returns:
-        A list of dictionaries, where each dictionary represents a causal path
-        with its nodes and a score indicating its influence.
-    """
+   
     model.eval()
     model.to(device)
     data = data.to(device)
 
     # 1. Get the k-hop subgraph (computation graph) around the target node.
-    # The number of hops should match the number of layers in the GNN.
     num_hops = max_path_len
     subset, sub_edge_index, mapping, _ = k_hop_subgraph(
         node_idx, num_hops, data.edge_index, relabel_nodes=True, num_nodes=data.num_nodes
@@ -281,7 +259,7 @@ def run_cpa_iv(model, data, node_idx, device, top_k=3, max_path_len=2):
     baseline_score = original_probs[sub_node_idx, predicted_class].item()
 
     # 3. Enumerate paths in the subgraph using NetworkX.
-    # Remove self-loops for cleaner pathfinding.
+    # Remove self-loops.
     sub_edge_index_no_loops, _ = remove_self_loops(sub_data.edge_index)
     nx_graph = to_networkx(Data(edge_index=sub_edge_index_no_loops, num_nodes=sub_data.num_nodes), to_undirected=False)
 
@@ -353,8 +331,8 @@ def data_to_cytoscape(data, predictions=None, class_map=None, selected_node_id=N
 
     # --- NEW: Process causal path data for styling ---
     if causal_paths is None: causal_paths = []
-    causal_nodes = {} # {node_id_str: path_rank}
-    causal_edges = {} # {tuple(sorted(u_str, v_str)): path_rank}
+    causal_nodes = {}
+    causal_edges = {} 
     for i, p_info in enumerate(causal_paths):
         path = p_info['path']
         rank = i + 1 # Rank is 1, 2, 3 for top paths
@@ -487,8 +465,8 @@ def data_to_cpa_cytoscape(cpa_iv_data, predictions, class_map, selected_node_id)
 
     nodes = set()
     edges = set()
-    causal_nodes_rank = {} # {node_id: rank}
-    causal_edges_rank = {} # {(u, v): rank}
+    causal_nodes_rank = {} 
+    causal_edges_rank = {} 
 
     for i, p_info in enumerate(cpa_iv_data):
         path = p_info['path']
@@ -547,7 +525,6 @@ def data_to_cpa_cytoscape(cpa_iv_data, predictions, class_map, selected_node_id)
 
 
 def plot_embeddings(embeddings, predictions, true_labels=None, class_map=None, dim_reduction='TSNE', selected_node_id=None):
-    """Generates Plotly scatter plot for node embeddings."""
     if embeddings is None: return go.Figure(layout={'title': "Embeddings (Not Available)", 'xaxis': {'visible': False}, 'yaxis': {'visible': False}})
     embeddings_np = embeddings.cpu().numpy() if isinstance(embeddings, torch.Tensor) else np.array(embeddings)
     predictions_np = predictions.cpu().numpy() if isinstance(predictions, torch.Tensor) else np.array(predictions) if predictions is not None else None
@@ -647,9 +624,9 @@ def plot_feature_histogram(features, node_id, feature_mask=None, top_k=10):
             plot_colors = ['red'] * len(indices_to_plot)
         else:
             print("Warning: Feature mask invalid. Showing non-zero features instead.")
-            feature_mask = None # Invalidate mask for sorting logic below
+            feature_mask = None 
 
-    if feature_mask is None: # Show non-zero if no valid mask
+    if feature_mask is None: 
         threshold = 1e-6
         non_zero_indices = np.where(np.abs(features) > threshold)[0]
         if len(non_zero_indices) == 0: return go.Figure(layout={'title': title + " (No non-zero features)"})
@@ -711,7 +688,7 @@ app.layout = html.Div([
     dcc.Store(id='selected-edge-store'),
     dcc.Store(id='dataset-info-store'),
     dcc.Store(id='explanation-store'),
-    dcc.Store(id='cpa-iv-store'), # NEW store for Causal Path results
+    dcc.Store(id='cpa-iv-store'), 
     html.H1("Interactive GNN Explainer", style={'textAlign': 'center', 'marginBottom': '20px'}),
     html.Div([
         html.Div([
@@ -728,7 +705,7 @@ app.layout = html.Div([
             html.Button('Add Edge', id='add-edge-button', n_clicks=0, style={'marginRight': '5px'}),
             html.Button('Remove Selected Edge', id='remove-edge-button', n_clicks=0),
         ], style={'display': 'flex', 'alignItems': 'center', 'marginTop': '10px'}),
-        # --- NEW Button for CPA-IV ---
+        # --- Button for CPA-IV ---
         html.Button('Explain with Causal Paths (CPA-IV)', id='run-cpa-iv-button', n_clicks=0, style={'marginTop': '10px', 'backgroundColor': '#4CAF50', 'color': 'white'}),
     ], id='control-panel', style={'padding': '15px', 'border': '1px solid #ddd', 'borderRadius': '5px', 'marginBottom': '20px', 'backgroundColor': '#f9f9f9'}),
     html.Div(id='status-message-area', style={'padding': '10px', 'marginBottom': '10px', 'border': '1px dashed #ccc', 'borderRadius': '5px', 'minHeight': '40px', 'backgroundColor': '#f0f0f0', 'whiteSpace': 'pre-wrap'}),
@@ -759,9 +736,9 @@ app.layout = html.Div([
             html.H3("GNN Explanation (Selected Node)"),
             html.Div(id='reasoning-output', style={'padding': '10px', 'marginTop': '5px', 'fontStyle': 'italic', 'color': '#333', 'border': '1px solid #e0e0e0', 'borderRadius': '5px', 'backgroundColor': '#fafafa', 'minHeight': '80px'}),
             
-            # --- NEW CPA-IV Section with Graph and Text side-by-side ---
+            # --- CPA-IV Section with Graph and Text side-by-side ---
             html.Div([
-                # Left Side: New Causal Path Graph
+                # Left Side: Causal Path Graph
                 html.Div([
                     html.H3("Causal Path Graph View"),
                     cyto.Cytoscape(
@@ -772,7 +749,7 @@ app.layout = html.Div([
                     )
                 ], style={'width': '48%', 'display': 'inline-block', 'verticalAlign': 'top', 'paddingRight': '2%'}),
 
-                # Right Side: Existing Causal Path Text Output
+                # Right Side: Causal Path Text Output
                 html.Div([
                     html.H3("Causal Path Explanation"),
                     html.Div(id='cpa-iv-output', style={'border': '1px solid #ddd', 'borderRadius': '5px', 'padding': '10px', 'height': '250px', 'overflowY': 'auto', 'backgroundColor': '#f9f9f9', 'fontSize': 'small'}),
@@ -805,7 +782,7 @@ def load_dataset_callback(dataset_name):
     dataset = load_dataset(dataset_name)
     empty_graph_store = {'edge_index': [[], []], 'features': [], 'labels': [], 'num_nodes': 0, 'train_mask': [], 'val_mask': [], 'test_mask': []}
     empty_dataset_info = {'class_map': {}, 'num_node_features': 0, 'num_classes': 0}
-    clear_explanation = None # Clear both explanation stores
+    clear_explanation = None 
 
     if dataset is None:
         error_message = f"Error: Failed to load dataset '{dataset_name}'."
@@ -833,7 +810,7 @@ def load_dataset_callback(dataset_name):
         if hasattr(dataset, 'num_classes') and data.y is not None:
             num_classes = dataset.num_classes
             class_map = {i: f'Class {i}' for i in range(num_classes)}
-            # --- AMENDED: Removed class maps for PubMed and Jazz ---
+            
             try:
                 ds_name_lower = dataset_name.lower()
                 if ds_name_lower == 'cora' and num_classes == 7: class_map = {0: 'Theory', 1: 'RL', 2: 'GA', 3: 'NN', 4: 'Prob', 5: 'Case', 6: 'Rule'}
@@ -1173,7 +1150,6 @@ def run_gnn_explainer_callback(selected_node_data, model_output, graph_store_dat
     trigger = ctx.triggered_id
     print(f"GNNExplainer callback triggered by: {trigger}")
 
-    # This callback now only triggers when the selected node changes, which is what we want for auto-explanation.
     if trigger != 'selected-node-store':
         return no_update, no_update
         
@@ -1243,7 +1219,7 @@ def run_gnn_explainer_callback(selected_node_data, model_output, graph_store_dat
         traceback.print_exc()
         return None, error_msg
 
-# --- NEW Callback to run CPA-IV ---
+# --- Callback to run CPA-IV ---
 @callback(
     Output('cpa-iv-store', 'data', allow_duplicate=True),
     Output('status-message-area', 'children', allow_duplicate=True),
@@ -1284,7 +1260,7 @@ def run_cpa_iv_callback(n_clicks, selected_node_data, graph_store_data, model_ty
         return None, f"CPA-IV failed: Error creating data object - {e}"
 
     try:
-        # --- MODIFIED: Changed max_path_len from 3 to 2 ---
+        
         causal_paths = run_cpa_iv(model, current_data, selected_node_idx, device, top_k=3, max_path_len=2)
         if causal_paths:
             status_message = f"CPA-IV finished. Found {len(causal_paths)} causal path(s) for Node {selected_node_idx}."
@@ -1310,7 +1286,7 @@ def run_cpa_iv_callback(n_clicks, selected_node_data, graph_store_data, model_ty
     Output('neighborhood-info-view', 'children'),
     Output('reasoning-output', 'children'),
     Output('cpa-iv-output', 'children'),
-    Output('cpa-iv-graph-view', 'elements'), # NEW output for the CPA graph
+    Output('cpa-iv-graph-view', 'elements'), 
     Input('current-model-output-store', 'data'),
     Input('selected-node-store', 'data'),
     Input('selected-edge-store', 'data'),
@@ -1346,7 +1322,7 @@ def update_visualizations(model_output, selected_node_data, selected_edge_data,
     neighbor_info_content = default_neighbor_text
     reasoning_content = default_reasoning_text
     cpa_iv_content = default_cpa_iv_text
-    cpa_cyto_elements = [] # NEW
+    cpa_cyto_elements = []
 
     if graph_store_data is None or graph_store_data.get('num_nodes', 0) == 0:
         print("Update visualizations skipped: No graph data.")
@@ -1394,14 +1370,14 @@ def update_visualizations(model_output, selected_node_data, selected_edge_data,
             node_idx_int = int(selected_node_id_str)
             if 0 <= node_idx_int < current_data.num_nodes:
                 selected_node_idx = node_idx_int
-                # ... (neighbor finding logic - unchanged)
+                
                 edge_index = current_data.edge_index
                 mask_source = edge_index[0] == selected_node_idx; mask_target = edge_index[1] == selected_node_idx
                 neighbors_from_source = edge_index[1][mask_source].tolist(); neighbors_from_target = edge_index[0][mask_target].tolist()
                 all_neighbors = set(neighbors_from_source + neighbors_from_target)
                 all_neighbors.discard(selected_node_idx)
                 neighbor_ids = sorted(list(all_neighbors))
-                # ... (neighbor details display - unchanged)
+                
                 neighbor_details = []
                 if neighbor_ids:
                         for neighbor_idx_int in neighbor_ids:
@@ -1418,7 +1394,7 @@ def update_visualizations(model_output, selected_node_data, selected_edge_data,
     # Process GNNExplainer data
     explanation_masks, node_feat_mask, edge_mask = None, None, None
     if selected_node_idx is not None and explanation_data and isinstance(explanation_data, dict):
-        # ... (explanation processing logic - unchanged)
+       
         try:
                 node_feat_mask_list = explanation_data.get('node_feat_mask'); edge_mask_list = explanation_data.get('edge_mask')
                 explanation_masks = {};
@@ -1460,7 +1436,7 @@ def update_visualizations(model_output, selected_node_data, selected_edge_data,
     if selected_node_idx is not None:
         feature_fig = plot_feature_histogram(current_data.x[selected_node_idx], selected_node_id_str, feature_mask=(explanation_masks.get('node_feat_mask') if explanation_masks else None))
 
-    # --- MODIFIED: 4. Selected Info Panel ---
+    # 4. Selected Info Panel 
     selected_info_content = []
     if selected_node_idx is not None:
         selected_info_content.append(html.Strong(f"Selected Node: {selected_node_idx}"))
