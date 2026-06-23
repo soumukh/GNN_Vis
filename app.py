@@ -81,6 +81,25 @@ sys.stdout.flush()
 
 sys.stderr.flush()
 
+# Stability helpers moved to separate module
+from app_stability import (
+    STABILITY_CACHE_DIR,
+    get_stability_cache_key,
+    get_stability_cache_path,
+    load_stability_cache,
+    save_stability_cache,
+    link_stability_cache_exists,
+    _scan_link_stability_cache,
+    get_link_stability_cache_key,
+    get_link_stability_cache_path,
+    load_link_stability_cache,
+    save_link_stability_cache,
+    _get_edge_mask,
+    run_stability_analysis,
+    run_link_stability_analysis,
+    _LinkPredWrapper,
+)
+
 # --- TASK: Configuration ---
 # Purpose: set global warnings, constants, and path variables used across the app.
 # Inputs: none (reads environment + project layout)
@@ -139,46 +158,8 @@ DATA_ABS_DIR = os.path.join(SCRIPT_DIR, DATA_DIR)
 
 # --- Stability Cache ---
 
-STABILITY_CACHE_DIR = os.path.join(SCRIPT_DIR, 'stability_cache')
-
-os.makedirs(STABILITY_CACHE_DIR, exist_ok=True)
-
-
-def get_stability_cache_key(dataset_name: str, model_type: str, sigma: float) -> str:
-    """Build a unique cache key string, e.g. 'cora_gcn_0.05'."""
-    return f"{dataset_name.lower()}_{model_type.lower()}_{sigma}"
-
-
-def get_stability_cache_path(cache_key: str) -> str:
-    """Return the absolute path for a given cache key pickle file."""
-    filename = f"stability_{cache_key.replace('.', '_').replace(' ', '_')}.pkl"
-    return os.path.join(STABILITY_CACHE_DIR, filename)
-
-
-def load_stability_cache(cache_key: str):
-    """Load cached stability results. Returns list of result dicts, or None if not found."""
-    path = get_stability_cache_path(cache_key)
-    if os.path.exists(path):
-        try:
-            with open(path, 'rb') as f:
-                data = pickle.load(f)
-            print(f"[STABILITY CACHE] Loaded from cache: {path}")
-            return data
-        except Exception as e:
-            print(f"[STABILITY CACHE] Failed to read cache ({path}): {e} — recomputing.")
-            return None
-    return None
-
-
-def save_stability_cache(cache_key: str, results: list) -> None:
-    """Persist stability results to a pickle file."""
-    path = get_stability_cache_path(cache_key)
-    try:
-        with open(path, 'wb') as f:
-            pickle.dump(results, f)
-        print(f"[STABILITY CACHE] Saved to cache: {path}")
-    except Exception as e:
-        print(f"[STABILITY CACHE] Failed to save cache ({path}): {e}")
+# Stability cache and compute helpers moved to `app_stability.py`.
+# See `app_stability.py` for: get_stability_cache_key, load/save, and compute routines.
 
 
 # --- TASK: Server-side cache helpers ---
@@ -380,6 +361,9 @@ def _scan_link_stability_cache() -> None:
             print(f"  ✓ {fname}  ({n} edges, {size_kb} KB)")
         except Exception:
             print(f"  ? {fname}  ({size_kb} KB, unreadable)")
+
+# Link stability cache helpers moved to `app_stability.py`.
+# Use functions from the module instead of local definitions.
 
 
 # --- TASK: Device setup ---
@@ -882,221 +866,7 @@ def run_cpa_iv(model, data, node_idx, top_k=5, max_path_len=2):
 
     return sorted(path_effects, key=lambda x: x['score'], reverse=True)[:top_k]
 
-# --- TASK: Stability Analysis Backend (node-level) ---
-# Purpose: compute node-level stability metrics using GNNExplainer and
-#          Gaussian perturbations. Returns JSON-serializable per-node stats.
-# Inputs: model, data, predictions_data, sigma, sample_size
-# Outputs: list of dicts with keys like `node_idx`, `stability`, `confidence`
-# Notes: This is the expensive per-node explainer workflow; a faster
-#        alternative (`run_prediction_consistency_stability`) exists below.
-
-# --- Stability Analysis Backend ---
-
-def _get_edge_mask(explanation):
-    """
-    Safely extract the edge mask from a PyG Explanation object.
-    Tries multiple attribute paths used across PyG versions.
-    Returns a numpy array or None.
-    """
-    # Method 1: standard attribute access (PyG >= 2.3)
-    mask = getattr(explanation, 'edge_mask', None)
-    if mask is not None:
-        return mask.detach().cpu().numpy()
-
-    # Method 2: dict-style .get() (PyG Data base class)
-    mask = explanation.get('edge_mask', None)
-    if mask is not None:
-        return mask.detach().cpu().numpy()
-
-    # Method 3: iterate all stored keys and look for mask-like names
-    for key in explanation.keys() if hasattr(explanation, 'keys') else []:
-        if 'edge' in key.lower() and 'mask' in key.lower():
-            val = explanation[key]
-            if val is not None:
-                print(f"[STABILITY] Found edge mask under key '{key}'")
-                return val.detach().cpu().numpy()
-
-    # Debug: show what IS available in the Explanation
-    try:
-        avail = list(explanation.keys()) if hasattr(explanation, 'keys') else dir(explanation)
-        print(f"[STABILITY] WARNING — edge_mask not found. Available keys: {avail}")
-    except Exception:
-        pass
-    return None
-
-
-def run_stability_analysis(model, data, predictions_data, sigma, sample_size):
-    """
-    Paper-defined global stability S(v) for every (sampled) node.
-
-    Algorithm (per node v):
-        1. Run GNNExplainer on original features → edge mask M(v)
-        2. Add Gaussian noise x̃ = x + N(0, σ²I) → run GNNExplainer → mask M̃(v)
-        3. S(v) = Jaccard( Top-k(M(v)), Top-k(M̃(v)) )   k = min(10, |edges|)
-
-    Additional metrics per node:
-        confidence  = softmax probability of predicted class (clean forward pass)
-        degree      = out-degree from edge_index
-        lipschitz   = ||M(v) − M̃(v)||₂ / ||x̃ − x||₂   (empirical Lipschitz sensitivity)
-        fidelity    = conf(original) − conf(edges removed)
-        correct     = (predicted label == true label)
-
-    sample_size = 0  → run on ALL nodes in the graph.
-    """
-    import traceback as _tb
-
-    print(f"\n[STABILITY COMPUTE] Starting — sigma={sigma}, sample_size={sample_size}")
-    model.eval()
-
-    x = data.x.to(device)
-    edge_index = data.edge_index.to(device)
-    true_labels = data.y.cpu().numpy()
-
-    preds_raw = predictions_data.get('preds', [])
-    if not preds_raw:
-        print("[STABILITY COMPUTE] ERROR: predictions_data['preds'] is empty!")
-        return []
-    preds = np.array(preds_raw)
-    print(f"[STABILITY COMPUTE] preds shape={preds.shape}, num_nodes={data.num_nodes}, edge_index shape={edge_index.shape}")
-
-    # Node degrees (out-degree from edge_index[0])
-    degrees = np.zeros(data.num_nodes, dtype=int)
-    ei_cpu = edge_index.cpu().numpy()
-    for src in ei_cpu[0]:
-        degrees[src] += 1
-
-    # Model confidence per node
-    with torch.no_grad():
-        out = model(x, edge_index)
-        # Handle both log_probs (log_softmax) and raw logits
-        if out.min().item() < -20:  # likely log_probs already
-            probs = torch.exp(out).cpu().numpy()
-        else:
-            probs = torch.softmax(out, dim=1).cpu().numpy()
-
-    print(f"[STABILITY COMPUTE] probs shape={probs.shape}, sample range=[{probs.min():.4f},{probs.max():.4f}]")
-
-    # Sample nodes reproducibly; 0 → all nodes
-    np.random.seed(42)
-    if sample_size == 0 or sample_size >= data.num_nodes:
-        sample_nodes = np.arange(data.num_nodes)
-        print(f"[STABILITY COMPUTE] Running on ALL {data.num_nodes} nodes")
-    else:
-        n_sample = int(sample_size)
-        sample_nodes = np.random.choice(data.num_nodes, size=n_sample, replace=False)
-        print(f"[STABILITY COMPUTE] Sampled {n_sample}/{data.num_nodes} nodes: "
-              f"{sample_nodes[:10].tolist()}{'...' if n_sample > 10 else ''}")
-    n_sample = len(sample_nodes)
-
-    # GNNExplainer — 20 epochs: fast enough for interactive use while still accurate
-    explainer = Explainer(
-        model=model,
-        algorithm=GNNExplainer(epochs=20),
-        explanation_type='model',
-        edge_mask_type='object',
-        model_config=dict(mode='multiclass_classification', task_level='node', return_type='log_probs')
-    )
-
-    results = []
-    skip_reasons = {}
-
-    for i, node_idx in enumerate(sample_nodes):
-        node_idx = int(node_idx)
-        try:
-            target_cls = int(preds[node_idx])
-            target = torch.tensor([target_cls], device=device)
-
-            # ── Original explanation ──────────────────────────────────────
-            exp_orig = explainer(x=x, edge_index=edge_index, target=target, index=node_idx)
-            mask_orig_np = _get_edge_mask(exp_orig)
-            if mask_orig_np is None:
-                reason = f"edge_mask=None (orig)"
-                skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
-                continue
-            if len(mask_orig_np) == 0:
-                reason = "empty mask (orig)"
-                skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
-                continue
-
-            top_k = min(10, len(mask_orig_np))
-            top10_orig = set(np.argsort(mask_orig_np)[-top_k:].tolist())
-
-            # ── Gaussian perturbation ─────────────────────────────────────
-            noise = torch.randn_like(x) * sigma
-            x_pert = x + noise
-
-            # ── Perturbed explanation ─────────────────────────────────────
-            exp_pert = explainer(x=x_pert, edge_index=edge_index, target=target, index=node_idx)
-            mask_pert_np = _get_edge_mask(exp_pert)
-            if mask_pert_np is None:
-                reason = "edge_mask=None (pert)"
-                skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
-                continue
-            if len(mask_pert_np) == 0:
-                reason = "empty mask (pert)"
-                skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
-                continue
-
-            top10_pert = set(np.argsort(mask_pert_np)[-top_k:].tolist())
-
-            # ── Top-10 Jaccard ─────────────────────────────────────────────
-            intersection = len(top10_orig & top10_pert)
-            union        = len(top10_orig | top10_pert)
-            jaccard      = intersection / union if union > 0 else 0.0
-
-            confidence = float(probs[node_idx, target_cls])
-            correct    = bool(target_cls == int(true_labels[node_idx]))
-
-            # ── Empirical Lipschitz ────────────────────────────────────────
-            noise_node_np = noise[node_idx].cpu().numpy()
-            denom         = float(np.linalg.norm(noise_node_np)) + 1e-8
-            # Guard against shape mismatch (masks should match since edge_index is fixed)
-            if mask_orig_np.shape == mask_pert_np.shape:
-                lipschitz = float(np.linalg.norm(mask_orig_np - mask_pert_np) / denom)
-            else:
-                lipschitz = float('nan')
-                print(f"[STABILITY COMPUTE]   node {node_idx}: mask shape mismatch "
-                      f"orig={mask_orig_np.shape} pert={mask_pert_np.shape}")
-
-            # ── Fidelity ───────────────────────────────────────────────────
-            fidelity = None
-            try:
-                keep = torch.ones(edge_index.shape[1], dtype=torch.bool, device=device)
-                keep[torch.tensor(list(top10_orig), dtype=torch.long, device=device)] = False
-                ei_rem = edge_index[:, keep]
-                with torch.no_grad():
-                    lp_rem   = model(x, ei_rem)
-                    prob_rem = float(torch.exp(lp_rem[node_idx, target_cls]).item())
-                fidelity = float(confidence - prob_rem)
-            except Exception:
-                pass  # fidelity stays None — JSON-safe
-
-            results.append({
-                'node_idx':   node_idx,
-                'confidence': confidence,
-                'degree':     int(degrees[node_idx]),
-                'stability':  float(jaccard),
-                'lipschitz':  float(lipschitz) if not (isinstance(lipschitz, float) and (lipschitz != lipschitz)) else None,
-                'fidelity':   fidelity,
-                'correct':    correct
-            })
-
-            if (i + 1) % 5 == 0 or (i + 1) == n_sample:
-                print(f"[STABILITY COMPUTE] Progress: {i+1}/{n_sample} — {len(results)} results so far")
-
-        except Exception as e:
-            reason = type(e).__name__ + ': ' + str(e)[:60]
-            skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
-            _tb.print_exc()   # ← full traceback so we can see the real error
-            continue
-
-    print(f"[STABILITY COMPUTE] Done: {len(results)} valid / {n_sample} sampled")
-    if skip_reasons:
-        print(f"[STABILITY COMPUTE] Skip reasons: {skip_reasons}")
-    if results:
-        print(f"[STABILITY COMPUTE] First result: {results[0]}")
-
-    return results
+# Stability functions moved to app_stability.py
 
 
 # --- TASK: Link stability cache helpers ---
@@ -1107,57 +877,8 @@ def run_stability_analysis(model, data, predictions_data, sigma, sample_size):
 
 # ── Link Stability Cache ───────────────────────────────────────────────────────
 
-def get_link_stability_cache_key(dataset_name: str, model_type: str, sigma: float) -> str:
-    return f"link_{dataset_name.lower()}_{model_type.lower()}_{sigma}"
 
-def get_link_stability_cache_path(cache_key: str) -> str:
-    """Returns the preferred (parquet) cache path for a given key."""
-    fname = f"stability_{cache_key.replace('.', '_').replace(' ', '_')}.parquet"
-    return os.path.join(STABILITY_CACHE_DIR, fname)
-
-def load_link_stability_cache(cache_key: str):
-    """Load cached link-stability results.
-    Checks .parquet first (written by precompute_link_stability.py or this app),
-    then falls back to legacy .pkl.  Returns list-of-dicts or None."""
-    stem = f"stability_{cache_key.replace('.', '_').replace(' ', '_')}"
-    parquet_path = os.path.join(STABILITY_CACHE_DIR, stem + '.parquet')
-    pkl_path     = os.path.join(STABILITY_CACHE_DIR, stem + '.pkl')
-
-    if os.path.exists(parquet_path):
-        try:
-            df = pd.read_parquet(parquet_path)
-            results = df.to_dict('records')
-            print(f"[LINK STABILITY CACHE] Loaded parquet ({len(results)} edges): {parquet_path}")
-            return results
-        except Exception as e:
-            print(f"[LINK STABILITY CACHE] Parquet read failed ({parquet_path}): {e}")
-
-    if os.path.exists(pkl_path):
-        try:
-            with open(pkl_path, 'rb') as f:
-                data = pickle.load(f)
-            print(f"[LINK STABILITY CACHE] Loaded pkl ({len(data)} edges): {pkl_path}")
-            return data
-        except Exception as e:
-            print(f"[LINK STABILITY CACHE] Pkl read failed ({pkl_path}): {e}")
-
-    return None
-
-def save_link_stability_cache(cache_key: str, results: list) -> None:
-    """Persist link-stability results as parquet (preferred) with pkl fallback."""
-    parquet_path = get_link_stability_cache_path(cache_key)
-    try:
-        pd.DataFrame(results).to_parquet(parquet_path, index=False)
-        print(f"[LINK STABILITY CACHE] Saved parquet ({len(results)} edges): {parquet_path}")
-    except Exception as e:
-        print(f"[LINK STABILITY CACHE] Parquet save failed: {e}  — trying pkl")
-        pkl_path = parquet_path.replace('.parquet', '.pkl')
-        try:
-            with open(pkl_path, 'wb') as f:
-                pickle.dump(results, f)
-            print(f"[LINK STABILITY CACHE] Saved pkl (fallback): {pkl_path}")
-        except Exception as e2:
-            print(f"[LINK STABILITY CACHE] Both save methods failed: {e2}")
+# Link stability cache functions moved to `app_stability.py`.
 
 
 # --- TASK: Link stability (per-edge) computations ---
@@ -1169,147 +890,7 @@ def save_link_stability_cache(cache_key: str, results: list) -> None:
 
 # ── Link Stability: GNNExplainer wrapper for a single edge (u→v) ──────────────
 
-class _LinkPredWrapper(torch.nn.Module):
-    """Wraps the base GNN so GNNExplainer can explain a single link (src→dst).
-    forward(x, edge_index) → sigmoid score [1,1] for binary_classification task."""
-    def __init__(self, base_model, src: int, dst: int):
-        super().__init__()
-        self.base_model = base_model
-        self.src = int(src)
-        self.dst = int(dst)
-
-    def forward(self, x, edge_index, **kwargs):
-        _, emb = self.base_model(x, edge_index, return_embeddings=True)
-        ep = torch.tensor([[self.src], [self.dst]], device=x.device, dtype=torch.long)
-        score = self.base_model.predict_links(emb, ep)
-        return score.sigmoid().view(1, 1)
-
-
-# ── Link Stability: main computation ─────────────────────────────────────────
-
-def run_link_stability_analysis(model, data, sigma: float, sample_size: int):
-    """
-    Per-edge paper-style stability:
-        S(u,v) = Jaccard( Top-k M(u,v), Top-k M̃(u,v) )
-    M(u,v) = GNNExplainer edge mask for link (u,v) on clean features
-    M̃(u,v) = same on x + N(0, σ²I)
-
-    Returns list of dicts with keys:
-        source, target, confidence, stability, degree_sum, common_neighbors, correct
-    """
-    from torch_geometric.explain import Explainer, GNNExplainer as _GNNExp
-    import traceback as _tb
-
-    print(f"\n[LINK STABILITY] Starting — sigma={sigma}, sample_size={sample_size}")
-    model.eval()
-    device = next(model.parameters()).device
-    x          = data.x.to(device)
-    edge_index = data.edge_index.to(device)
-    num_nodes  = data.num_nodes
-    ei_cpu     = edge_index.cpu().numpy()
-
-    # Out-degree per node
-    degrees = np.zeros(num_nodes, dtype=int)
-    for s in ei_cpu[0]:
-        degrees[int(s)] += 1
-
-    # Neighbour sets for common-neighbour count
-    adj = [set() for _ in range(num_nodes)]
-    for i in range(ei_cpu.shape[1]):
-        u, v = int(ei_cpu[0, i]), int(ei_cpu[1, i])
-        adj[u].add(v)
-        adj[v].add(u)
-
-    # Deduplicate to undirected edges
-    seen, candidate_edges = set(), []
-    for i in range(ei_cpu.shape[1]):
-        u, v = int(ei_cpu[0, i]), int(ei_cpu[1, i])
-        key  = (min(u, v), max(u, v))
-        if key not in seen:
-            seen.add(key)
-            candidate_edges.append((u, v))
-    print(f"[LINK STABILITY] Unique undirected edges: {len(candidate_edges)}")
-
-    # Sampling
-    if sample_size == 0 or sample_size >= len(candidate_edges):
-        sampled = candidate_edges
-        print(f"[LINK STABILITY] Running on ALL {len(sampled)} edges")
-    else:
-        idx     = np.random.choice(len(candidate_edges), size=int(sample_size), replace=False)
-        sampled = [candidate_edges[i] for i in idx]
-        print(f"[LINK STABILITY] Sampled {len(sampled)} edges")
-
-    # Batch confidence for all sampled edges (single forward pass)
-    with torch.no_grad():
-        _, emb_clean = model(x, edge_index, return_embeddings=True)
-        srcs = torch.tensor([u for u, v in sampled], device=device, dtype=torch.long)
-        dsts = torch.tensor([v for u, v in sampled], device=device, dtype=torch.long)
-        scores_batch = model.predict_links(emb_clean, torch.stack([srcs, dsts]))
-        confs = torch.sigmoid(scores_batch).cpu().numpy().ravel()
-
-    results  = []
-    n_ok     = 0
-    n_fail   = 0
-    skip_reasons: dict = {}
-
-    for i, (u, v) in enumerate(sampled):
-        try:
-            conf    = float(confs[i])
-            correct = conf > 0.5
-            deg_sum = int(degrees[u]) + int(degrees[v])
-            cn      = len(adj[u].intersection(adj[v]))
-
-            # Build per-edge GNNExplainer (cheap: 20 epochs)
-            wrapper = _LinkPredWrapper(model, u, v)
-            wrapper.eval()
-            link_explainer = Explainer(
-                model=wrapper,
-                algorithm=_GNNExp(epochs=20),
-                explanation_type='model',
-                edge_mask_type='object',
-                model_config=dict(mode='binary_classification', task_level='graph', return_type='raw')
-            )
-
-            exp_orig = link_explainer(x=x, edge_index=edge_index)
-            mask_orig = _get_edge_mask(exp_orig)
-
-            noise    = torch.randn_like(x) * sigma
-            exp_pert = link_explainer(x=(x + noise), edge_index=edge_index)
-            mask_pert = _get_edge_mask(exp_pert)
-
-            if mask_orig is None or mask_pert is None:
-                raise ValueError("Could not extract edge mask")
-
-            k        = min(10, len(mask_orig))
-            top_o    = set(np.argsort(mask_orig)[-k:].tolist())
-            top_p    = set(np.argsort(mask_pert)[-k:].tolist())
-            union    = top_o | top_p
-            jaccard  = len(top_o & top_p) / len(union) if union else 1.0
-
-            results.append({
-                'source':           int(u),
-                'target':           int(v),
-                'confidence':       conf,
-                'stability':        float(jaccard),
-                'degree_sum':       deg_sum,
-                'common_neighbors': cn,
-                'correct':          bool(correct),
-            })
-            n_ok += 1
-            if (i + 1) % 25 == 0:
-                print(f"[LINK STABILITY]   {i+1}/{len(sampled)} edges done")
-
-        except Exception as e:
-            n_fail += 1
-            reason = type(e).__name__ + ': ' + str(e)[:60]
-            skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
-            if n_fail <= 3:
-                _tb.print_exc()
-
-    print(f"[LINK STABILITY] Done — {n_ok} ok / {n_fail} failed")
-    if skip_reasons:
-        print(f"[LINK STABILITY] Failures: {skip_reasons}")
-    return results
+# Link stability computation moved to `app_stability.py`.
 
 
 # --- TASK: Fast prediction-consistency stability backend ---
@@ -1321,162 +902,7 @@ def run_link_stability_analysis(model, data, sigma: float, sample_size: int):
 
 # --- Fast Prediction-Consistency Stability Backend ---
 
-def run_prediction_consistency_stability(model, data, predictions_data, sigma,
-                                         sample_size, n_trials=20):
-    """
-    Global prediction-consistency stability for ALL (or sampled) nodes.
-
-    Algorithm
-    ---------
-    For each trial t = 1..n_trials:
-        x_noisy = x + N(0, sigma^2 * I)
-        logits_t = model(x_noisy, edge_index)   <- ONE forward pass covers ALL nodes
-        pred_t[i] = argmax(logits_t[i])
-
-    Per node i:
-        stability_score  = fraction of trials where pred_t[i] == original_pred[i]
-        prediction_entropy = H( empirical class distribution across trials )
-        embedding_variance = mean variance of hidden embeddings across trials
-        confidence       = softmax probability of original predicted class (clean forward pass)
-        degree           = out-degree from edge_index
-        correct          = (original_pred[i] == true_label[i])
-
-    Performance: n_trials forward passes total, independent of number of nodes.
-    Can cover ALL 2708 Cora nodes in < 5 seconds on CPU.
-    """
-    import traceback as _tb
-    import math as _math
-
-    print(f"\n[FAST-STAB] Starting — sigma={sigma}, n_trials={n_trials}, "
-          f"sample_size={sample_size}, total_nodes={data.num_nodes}")
-
-    model.eval()
-    x          = data.x.to(device)
-    edge_index = data.edge_index.to(device)
-    true_labels = data.y.cpu().numpy()
-
-    preds_raw = predictions_data.get('preds', [])
-    if not preds_raw:
-        print("[FAST-STAB] ERROR: preds_raw is empty")
-        return []
-    orig_preds = np.array(preds_raw)  # shape (N,)
-    num_nodes  = data.num_nodes
-    num_classes = int(orig_preds.max()) + 1
-
-    # ── Node degrees (out-degree) ────────────────────────────────────────
-    degrees = np.zeros(num_nodes, dtype=int)
-    ei_cpu = edge_index.cpu().numpy()
-    for src in ei_cpu[0]:
-        degrees[src] += 1
-
-    # ── Clean confidence ─────────────────────────────────────────────────
-    with torch.no_grad():
-        out_clean = model(x, edge_index)
-        if out_clean.min().item() < -10:          # log-softmax output
-            probs_clean = torch.exp(out_clean).cpu().numpy()
-        else:
-            probs_clean = torch.softmax(out_clean, dim=1).cpu().numpy()
-
-    # ── Sample nodes (all nodes if sample_size >= num_nodes) ─────────────
-    n_sample = min(int(sample_size), num_nodes)
-    np.random.seed(42)
-    if n_sample >= num_nodes:
-        sample_nodes = np.arange(num_nodes)
-        print(f"[FAST-STAB] Running on ALL {num_nodes} nodes")
-    else:
-        sample_nodes = np.random.choice(num_nodes, n_sample, replace=False)
-        print(f"[FAST-STAB] Sampled {n_sample} / {num_nodes} nodes")
-
-    # ── Accumulate per-trial predictions for sampled nodes ───────────────
-    # trial_preds[t, i] = predicted class for sample_nodes[i] on trial t
-    trial_preds = np.zeros((n_trials, len(sample_nodes)), dtype=int)
-
-    # For embedding variance: accumulate hidden-layer outputs if GCNNet
-    # We collect all embeddings then compute per-node variance.
-    collect_embeddings = hasattr(model, 'conv1')  # GCNNet / GATNet both have conv1
-
-    if collect_embeddings:
-        # Shape: (n_trials, len(sample_nodes), hidden_dim)
-        emb_list = []
-
-    print(f"[FAST-STAB] Running {n_trials} noisy forward passes …")
-    for t in range(n_trials):
-        noise = torch.randn_like(x) * sigma
-        x_pert = x + noise
-        with torch.no_grad():
-            if collect_embeddings:
-                # Get both output and intermediate embeddings
-                try:
-                    out_t, emb_t = model(x_pert, edge_index, return_embeddings=True)
-                    emb_list.append(emb_t[sample_nodes].cpu().numpy())
-                except TypeError:
-                    out_t = model(x_pert, edge_index)
-                    collect_embeddings = False
-            else:
-                out_t = model(x_pert, edge_index)
-
-        pred_t = out_t.argmax(dim=1).cpu().numpy()   # shape (N,)
-        trial_preds[t] = pred_t[sample_nodes]
-
-        if (t + 1) % 5 == 0 or (t + 1) == n_trials:
-            print(f"[FAST-STAB]   trial {t+1}/{n_trials} done")
-
-    # ── Compute per-node metrics ─────────────────────────────────────────
-    # trial_preds: (n_trials, n_sample)
-    orig_for_sample = orig_preds[sample_nodes]          # shape (n_sample,)
-
-    # 1. Stability = fraction of trials matching original prediction
-    matches         = (trial_preds == orig_for_sample[np.newaxis, :])  # (n_trials, n_sample)
-    stability_scores = matches.mean(axis=0)                             # (n_sample,)
-
-    # 2. Prediction entropy across trials  H = -sum p_c * log(p_c)
-    #    Empirical class probabilities for each sampled node
-    entropy_scores = np.zeros(len(sample_nodes))
-    for i in range(len(sample_nodes)):
-        cls_counts = np.bincount(trial_preds[:, i], minlength=num_classes)
-        cls_probs  = cls_counts / n_trials
-        # Avoid log(0)
-        nz = cls_probs[cls_probs > 0]
-        entropy_scores[i] = float(-np.sum(nz * np.log2(nz)))
-
-    # 3. Embedding variance (if collected)
-    emb_var_scores = None
-    if collect_embeddings and emb_list:
-        emb_array  = np.stack(emb_list, axis=0)          # (n_trials, n_sample, hidden)
-        emb_var_scores = emb_array.var(axis=0).mean(axis=1)  # (n_sample,) mean var across dims
-
-    # ── Build result list ────────────────────────────────────────────────
-    results = []
-    for i, node_idx in enumerate(sample_nodes):
-        node_idx = int(node_idx)
-        conf     = float(probs_clean[node_idx, int(orig_preds[node_idx])])
-        correct  = bool(int(orig_preds[node_idx]) == int(true_labels[node_idx]))
-
-        r = {
-            'node_idx':   node_idx,
-            'confidence': conf,
-            'degree':     int(degrees[node_idx]),
-            'stability':  float(stability_scores[i]),
-            'entropy':    float(entropy_scores[i]),
-            'correct':    correct,
-        }
-        if emb_var_scores is not None:
-            r['embedding_variance'] = float(emb_var_scores[i])
-
-        # JSON-safety
-        for k, v in r.items():
-            if isinstance(v, float) and (_math.isnan(v) or _math.isinf(v)):
-                r[k] = None
-
-        results.append(r)
-
-    n_c = sum(1 for r in results if r['correct'])
-    avg_s = float(np.mean([r['stability'] for r in results]))
-    print(f"[FAST-STAB] Done: {len(results)} nodes, correct={n_c}, "
-          f"avg_stability={avg_s:.3f}")
-    if results:
-        print(f"[FAST-STAB] first result: {results[0]}")
-    return results
+# Fast prediction-consistency stability moved to `app_stability.py`.
 
 
 # --- TASK: Path utilities for CPA-IV ---
@@ -2424,7 +1850,7 @@ def create_cpa_iv_panel(cpa_data, node_idx):
             ], style={'marginBottom': '10px'}),
             html.Div([
                 html.Div(style={'display': 'flex', 'justifyContent': 'space-between', 'marginBottom': '5px'}, children=[
-                    html.Span("CAUSAL STRENGTH", style={'fontSize': '11px', 'fontWeight': 'bold', 'color': '#666'}),
+                    html.Span("CAUSAL STRENGwheTH", style={'fontSize': '11px', 'fontWeight': 'bold', 'color': '#666'}),
                     html.Span(strength_label, style={'fontSize': '11px', 'fontWeight': 'bold', 'color': strength_color})
                 ]),
                 html.Div(style={'height': '8px', 'backgroundColor': '#eee', 'borderRadius': '4px', 'overflow': 'hidden'}, children=[
@@ -2830,7 +2256,6 @@ app.layout = html.Div(style={
     
     dcc.Store(id='selected-path-store'),
 
-    dcc.Store(id='link-prediction-store'),
     # Placeholder removed: actual header component is defined in Layer 3
 
     dcc.Store(id='selected-link-store'),
@@ -2854,9 +2279,7 @@ app.layout = html.Div(style={
 
     dcc.Store(id='drilldown-click-store', data=None),
 
-    dcc.Store(id='link-stability-results-store', data=None),
-
-    dcc.Store(id='link-drilldown-click-store', data=None),
+    dcc.Store(id='link-prediction-store'),
 
     # Hidden placeholder components
 
@@ -3441,33 +2864,7 @@ app.layout = html.Div(style={
                                 html.Div(id='stability-section', children=[
 
                                     # ── Mode toggle: Node / Link ──────────────────────────────────
-                                    html.Div(style={
-                                        'display': 'flex', 'gap': '0', 'marginBottom': '14px',
-                                        'border': '1px solid #dee2e6', 'borderRadius': '6px',
-                                        'overflow': 'hidden', 'width': 'fit-content',
-                                    }, children=[
-                                        html.Button(
-                                            "Node Stability",
-                                            id='stability-node-btn', n_clicks=0,
-                                            style={
-                                                'padding': '7px 20px', 'fontSize': '13px',
-                                                'fontWeight': 'bold', 'border': 'none',
-                                                'backgroundColor': '#17a2b8', 'color': '#fff',
-                                                'cursor': 'pointer',
-                                            },
-                                        ),
-                                        html.Button(
-                                            "Link Stability",
-                                            id='stability-link-btn', n_clicks=0,
-                                            style={
-                                                'padding': '7px 20px', 'fontSize': '13px',
-                                                'fontWeight': 'bold', 'border': 'none',
-                                                'borderLeft': '1px solid #dee2e6',
-                                                'backgroundColor': '#f8f9fa', 'color': '#495057',
-                                                'cursor': 'pointer',
-                                            },
-                                        ),
-                                    ]),
+                                    # Node Stability button removed; show node stability controls directly
 
                                     # ── NODE stability section ────────────────────────────────────
                                     html.Div(id='node-stability-section', children=[
@@ -3673,170 +3070,7 @@ app.layout = html.Div(style={
 
                                     ]),  # ← close node-stability-section
 
-                                    # ── LINK stability section ────────────────────────────────────
-                                    html.Div(id='link-stability-section', style={'display': 'none'}, children=[
-
-                                        # Controls
-                                        html.Div(style={
-                                            'display': 'flex', 'gap': '14px', 'alignItems': 'flex-end',
-                                            'flexWrap': 'wrap', 'marginBottom': '14px',
-                                        }, children=[
-                                           #html.Div([
-                                                html.Label("Noise σ", style={'fontWeight': 'bold', 'fontSize': '12px', 'color': '#555', 'display': 'block', 'marginBottom': '4px'}),
-                                                dcc.RadioItems(
-                                                    id='link-stability-sigma-selector',
-                                                    options=[
-                                                        {'label': ' 0.01', 'value': 0.01},
-                                                        {'label': ' 0.05', 'value': 0.05},
-                                                        {'label': ' 0.10', 'value': 0.1},
-                                                    ],
-                                                    value=0.05, inline=True,
-                                                    inputStyle={'marginRight': '4px'},
-                                                    style={'fontSize': '13px', 'color': '#333'},
-                                                ),
-                                            #]),
-
-                                            html.Div(
-                                            style={
-                                                'width': '1px',
-                                                'height': '24px',
-                                                'backgroundColor': '#ddd'
-                                                }
-                                            ),
-
-                                            html.Div(style={'display': 'flex', 'alignItems': 'center', 'gap': '10px', 'flexWrap': 'wrap'}, children=[
-                                                    html.Span("Visualization Type:", style={'fontSize': '13px', 'color': '#555', 'fontWeight': 'bold'}),
-                                                    dcc.Dropdown(
-                                                        id='link-stability-plot-type',
-                                                        options=[
-                                                            {'label': 'Scatter Plot', 'value': 'scatter'},
-                                                            {'label': 'Hexbin',       'value': 'hexbin'},
-                                                            {'label': 'KDE',          'value': 'kde'},
-                                                        ],
-                                                        value='scatter', clearable=False,
-                                                        style={'width': '120px', 'fontSize': '13px'},
-                                                    ),
-
-                                                    html.Div(
-                                                         style={
-                                                            'width': '1px',
-                                                            'height': '24px',
-                                                            'backgroundColor': '#ddd'
-                                                        }
-                                                    ),
-                                                    html.Span("Axis Metrics:", style={'fontSize': '13px', 'color': '#555', 'fontWeight': 'bold', 'marginLeft': '10px'}),
-                                                    dcc.Dropdown(
-                                                        id='link-stability-metric-selector',
-                                                        options=[
-                                                            {'label': 'Confidence vs Stability',       'value': 'confidence'},
-                                                            {'label': 'Degree Sum vs Stability',       'value': 'degree_sum'},
-                                                            {'label': 'Common Neighbors vs Stability', 'value': 'common_neighbors'},
-                                                        ],
-                                                        value='confidence', clearable=False,
-                                                        style={'width': '240px', 'fontSize': '13px'},
-                                                    ),
-                                                ]),
-
-                                                html.Div(
-                                                         style={
-                                                            'width': '1px',
-                                                            'height': '24px',
-                                                            'backgroundColor': '#ddd'
-                                                        }
-                                                    ),
-
-                                            html.Div([
-                                                #html.Label("Edges to Analyze  (0 = Full Graph)",
-                                                #           style={'fontWeight': 'bold', 'fontSize': '12px', 'color': '#555', 'display': 'block', 'marginBottom': '4px'}),
-                                                dcc.Input(
-                                                    id='link-stability-sample-size', type="hidden",
-                                                    #type='number', value=0,
-                                                    min=0, max=5000, step=50, placeholder='0 = all',
-                                                    style={'width': '90px', 'padding': '5px 8px', 'border': '1px solid #ccc', 'borderRadius': '4px', 'fontSize': '13px'},
-                                                ),
-                                                #html.Div("Default: full graph  ·  0 = all edges",
-                                                #         style={'fontSize': '10px', 'color': '#22c55e', 'marginTop': '3px', 'fontStyle': 'italic'}),
-                                            ]),
-                                            html.Button(
-                                                "Run Stability Analysis",
-                                                id='run-link-stability-button', n_clicks=0,
-                                                style={
-                                                    'backgroundColor': '#22c55e', 'color': 'white',
-                                                    'border': 'none', 'padding': '8px 20px',
-                                                    'borderRadius': '4px', 'cursor': 'pointer',
-                                                    'fontWeight': 'bold', 'fontSize': '12px', 'whiteSpace': 'nowrap',
-                                                },
-                                            ),
-                                            html.Div(id='link-stability-status',
-                                                     style={'fontSize': '12px', 'color': '#666', 'alignSelf': 'center', 'fontStyle': 'italic'},
-                                                     children=" "),
-                                        ]),
-
-                                        # Split-screen layout (left: main plot, right: drilldown)
-                                        html.Div(style={
-                                            'display': 'flex', 'gap': '20px', 'alignItems': 'flex-start', 'marginTop': '10px'
-                                        }, children=[
-
-                                            # LEFT column
-                                            html.Div(style={'flex': '1', 'minWidth': '0', 'display': 'flex', 'flexDirection': 'column', 'gap': '12px'}, children=[
-                                                
-                                                html.Div(style={'border': '1px solid #dee2e6', 'borderRadius': '4px', 'padding': '8px', 'backgroundColor': '#fafafa'}, children=[
-                                                    dcc.Graph(
-                                                        id='link-main-stability-plot',
-                                                        figure=go.Figure(layout={'title': 'Select a metric to view', 'height': 360, 'margin': dict(l=40, r=15, t=40, b=40), 'paper_bgcolor': 'rgba(0,0,0,0)', 'plot_bgcolor': 'rgba(0,0,0,0)'}),
-                                                        style={'height': '360px'},
-                                                        config={'displayModeBar': False},
-                                                    )
-                                                ]),
-                                                html.Div(
-                                                    id='link-stability-stats-panel',
-                                                    style={'border': '1px solid #ccc', 'padding': '10px', 'backgroundColor': '#fff', 'borderRadius': '4px', 'fontSize': '12px'},
-                                                    children=html.Div("Run analysis to see statistics.", style={'color': '#999', 'textAlign': 'center', 'paddingTop': '10px'})
-                                                ),
-                                            ]),
-
-                                            # RIGHT column (drilldown, hidden until click)
-                                            html.Div(id='link-drilldown-right-panel', style={'flex': '1', 'minWidth': '0', 'display': 'none', 'flexDirection': 'column', 'gap': '12px'}, children=[
-                                                html.Div(style={'display': 'flex', 'alignItems': 'center', 'gap': '10px', 'padding': '8px 12px', 'backgroundColor': '#f0fdf4', 'borderRadius': '6px', 'border': '1px solid #bbf7d0', 'flexWrap': 'wrap'}, children=[
-                                                    html.Span("Region Size (ε):", style={'fontSize': '12px', 'fontWeight': 'bold', 'color': '#14532d', 'whiteSpace': 'nowrap'}),
-                                                    html.Div(style={'flex': '1', 'minWidth': '120px'}, children=[
-                                                        dcc.Slider(
-                                                            id='link-drilldown-epsilon-slider',
-                                                            min=0.01, max=0.30, step=0.01, value=0.08,
-                                                            marks={v: f'{v:.2f}' for v in [0.01, 0.05, 0.10, 0.15, 0.20, 0.30]},
-                                                            tooltip={'placement': 'bottom', 'always_visible': False},
-                                                        ),
-                                                    ]),
-                                                    html.Button(
-                                                        "Reset Selection", id='link-drilldown-reset-btn', n_clicks=0,
-                                                        style={'fontSize': '12px', 'padding': '4px 12px', 'backgroundColor': '#dc3545', 'color': '#fff', 'border': 'none', 'borderRadius': '4px', 'cursor': 'pointer', 'whiteSpace': 'nowrap'},
-                                                    ),
-                                                ]),
-                                                html.Div(
-                                                    id='link-drilldown-hint',
-                                                    style={'fontSize': '11px', 'color': '#666', 'fontStyle': 'italic', 'textAlign': 'center'},
-                                                    children="Click any region on the left plot to drill down",
-                                                ),
-                                                html.Div(style={'border': '1px solid #dee2e6', 'borderRadius': '6px', 'backgroundColor': '#fafafa', 'padding': '8px'}, children=[
-                                                    html.Div(
-                                                        id='link-drilldown-panel-header',
-                                                        children="Click on a region to explore edge-level details",
-                                                        style={'fontSize': '12px', 'fontWeight': 'bold', 'color': '#555', 'marginBottom': '6px', 'padding': '4px 8px', 'backgroundColor': '#e9ecef', 'borderRadius': '4px'},
-                                                    ),
-                                                    dcc.Graph(
-                                                        id='link-drilldown-scatter',
-                                                        figure=go.Figure(layout=dict(
-                                                            height=360, margin=dict(l=45, r=15, t=40, b=40), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
-                                                            annotations=[dict(xref='paper', yref='paper', x=0.5, y=0.5, text='Click on a plot region to see edge details here', showarrow=False, font=dict(size=13, color='#aaa'), xanchor='center', yanchor='middle')],
-                                                        )),
-                                                        style={'height': '360px'},
-                                                        config={'displayModeBar': True, 'modeBarButtonsToRemove': ['lasso2d', 'select2d']},
-                                                    ),
-                                                ]),
-                                            ]),
-                                        ]),
-
-                                    ]),  # ← close link-stability-section
+                                    # Link stability section removed in this version
 
                                 ]),
 
@@ -7230,11 +6464,13 @@ def _make_path_network_figure(path_nodes, all_paths, source, target):
     State('editable-graph-store', 'data'),
     State('current-predictions-store', 'data'),
     State('model-dropdown', 'value'),
+    State('analysis-mode-store', 'data'),
     prevent_initial_call=True
 )
 
 def run_stability_callback(n_clicks, sigma, sample_size,
-                            package, dataset, graph_data, predictions_data, model_type):
+                            package, dataset, graph_data, predictions_data, model_type,
+                            analysis_mode):
     """
     Global stability analysis — GNNExplainer Top-k Jaccard (paper-defined).
     Runs on every node (or a random sample when sample_size > 0).
@@ -7254,8 +6490,64 @@ def run_stability_callback(n_clicks, sigma, sample_size,
         # ── Cache check (only cache full-graph runs; sampled runs are not cached) ──
         dataset_name = dataset.get('name', 'unknown')
         _use_cache   = (sample_size == 0)          # only cache full-graph results
-        _cache_key   = get_stability_cache_key(dataset_name, model_type or 'gcn', sigma)
 
+        # If analysis mode indicates link prediction, run link-stability branch
+        mode = (analysis_mode or '').lower()
+        if 'link' in mode or 'link_prediction' in mode:
+            _cache_key = get_link_stability_cache_key(dataset_name, model_type or 'gcn', sigma)
+            if _use_cache:
+                _cached = load_link_stability_cache(_cache_key)
+                if _cached is not None:
+                    print(f"[LINK STABILITY] Loading from cache (key={_cache_key})")
+                    safe_results = _cached
+                    import math
+                    def _safe(v):
+                        if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+                            return None
+                        return v
+                    safe_results = [{k: _safe(v) for k, v in r.items()} for r in safe_results]
+                    n_edges = len(safe_results)
+                    avg_stab = sum(r.get('stability', 0) or 0 for r in safe_results) / max(1, n_edges)
+                    scope_label = f"FULL GRAPH ({n_edges} edges) [from cache]"
+                    status = (f"⚡ {scope_label} · σ={sigma} · avg S = {avg_stab:.3f}")
+                    return safe_results, status
+            else:
+                print(f"[LINK STABILITY] Sampled run — skipping cache lookup")
+
+            model = get_cached_model(package, dataset['num_features'], dataset.get('num_classes', 2))
+            if model is None:
+                return [], "❌ Could not load model."
+
+            pyg_data = prepare_torch_data(dataset, graph_data, include_labels=False)
+            if pyg_data is None:
+                return [], "❌ Could not construct graph data."
+
+            print(f"[LINK STABILITY] Computing from scratch (key={_cache_key})")
+            results = run_link_stability_analysis(model, pyg_data, sigma, sample_size)
+            print(f"[LINK STABILITY] raw results: {len(results)} entries")
+
+            if not results:
+                return [], "⚠️ No results — check console logs."
+
+            # sanitize
+            import math
+            def _safe(v):
+                if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+                    return None
+                return v
+            safe_results = [{k: _safe(v) for k, v in r.items()} for r in results]
+
+            # persist
+            if _use_cache:
+                save_link_stability_cache(_cache_key, safe_results)
+
+            n_edges = len(safe_results)
+            avg_stab = sum(r.get('stability', 0) or 0 for r in safe_results) / max(1, n_edges)
+            status = (f"✅ FULL GRAPH ({n_edges} edges) · σ={sigma} · avg S = {avg_stab:.3f}")
+            return safe_results, status
+
+        # Default: node stability branch
+        _cache_key   = get_stability_cache_key(dataset_name, model_type or 'gcn', sigma)
         if _use_cache:
             _cached = load_stability_cache(_cache_key)
             if _cached is not None:
@@ -7378,6 +6670,17 @@ def render_stability_plots(results, plot_type, metric_type):
     print(f"[STABILITY PLOT] columns : {list(df.columns)}")
     print(f"[STABILITY PLOT] shape   : {df.shape}")
     print(f"[STABILITY PLOT] nulls   : { {c: int(df[c].isna().sum()) for c in df.columns} }")
+
+    # Normalize link-oriented results to node-oriented plotting schema
+    if 'node_idx' not in df.columns and 'source' in df.columns and 'target' in df.columns:
+        try:
+            df['node_idx'] = df['source'].astype(str) + '-' + df['target'].astype(str)
+            # map degree_sum -> degree for link results if present
+            if 'degree' not in df.columns and 'degree_sum' in df.columns:
+                df['degree'] = df['degree_sum']
+            print("[STABILITY PLOT] Normalized link result columns: created 'node_idx' and mapped 'degree_sum'->'degree'")
+        except Exception:
+            print("[STABILITY PLOT] Could not normalize link result columns")
     for _req_col in ('confidence', 'stability', 'degree', 'lipschitz'):
         if _req_col in df.columns:
             _nv = int(df[_req_col].notna().sum())
@@ -7768,7 +7071,7 @@ def render_stability_plots(results, plot_type, metric_type):
 
     # Paper-defined method: GNNExplainer Top-k Jaccard
     # Y-axis is always "Top-k Jaccard"; Plot 3 is always Lipschitz vs Stability
-    stab_label = 'Top-k Jaccard'
+    stab_label = 'Stability'
 
     # ── Explicit per-plot dispatch (no closure ambiguity) ─────────────────────
     print(f"[STABILITY PLOT] DISPATCH BRANCH → {plot_type.upper()}")
@@ -8541,590 +7844,6 @@ def highlight_region_on_main_plots(click_data, epsilon):
     p_main['layout']['annotations'] = [label]
     return p_main
 
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# LINK STABILITY CALLBACKS
-# ═══════════════════════════════════════════════════════════════════════════════
-
-_LINK_PANEL_HIDDEN = {'flex': '1', 'minWidth': '0', 'flexDirection': 'column', 'gap': '12px', 'display': 'none'}
-_LINK_PANEL_SHOWN  = {'flex': '1', 'minWidth': '0', 'flexDirection': 'column', 'gap': '12px', 'display': 'flex'}
-
-# ── 1. Toggle Node / Link sections ───────────────────────────────────────────
-
-@callback(
-    Output('node-stability-section', 'style'),
-    Output('link-stability-section', 'style'),
-    Output('stability-node-btn', 'style'),
-    Output('stability-link-btn', 'style'),
-    Input('stability-node-btn', 'n_clicks'),
-    Input('stability-link-btn', 'n_clicks'),
-    Input('selected-node-store', 'data'),
-    Input('selected-link-store', 'data'),
-    Input('analysis-mode-store', 'data'),
-    prevent_initial_call=False,
-)
-def toggle_stability_mode(node_clicks, link_clicks, selected_node, selected_link, analysis_mode):
-    _btn_active   = {'padding': '7px 20px', 'fontSize': '13px', 'fontWeight': 'bold', 'border': 'none', 'backgroundColor': '#17a2b8', 'color': '#fff', 'cursor': 'pointer'}
-    _btn_link_act = {'padding': '7px 20px', 'fontSize': '13px', 'fontWeight': 'bold', 'border': 'none', 'borderLeft': '1px solid #dee2e6', 'backgroundColor': '#22c55e', 'color': '#fff', 'cursor': 'pointer'}
-    _btn_inactive = {'padding': '7px 20px', 'fontSize': '13px', 'fontWeight': 'bold', 'border': 'none', 'borderLeft': '1px solid #dee2e6', 'backgroundColor': '#f8f9fa', 'color': '#495057', 'cursor': 'pointer'}
-
-    triggered = ctx.triggered_id
-
-    # Priority: explicit button clicks > selection > analysis_mode
-    if triggered == 'stability-link-btn':
-        show_link = True
-    elif triggered == 'stability-node-btn':
-        show_link = False
-    else:
-        # If a link is selected or analysis_mode indicates link prediction, show link stability
-        if selected_link:
-            show_link = True
-        elif analysis_mode == 'link_prediction':
-            show_link = True
-        else:
-            show_link = False
-
-    node_style = {'display': 'none'} if show_link else {'display': 'block'}
-    link_style = {'display': 'block'} if show_link else {'display': 'none'}
-    node_btn   = _btn_inactive if show_link else _btn_active
-    link_btn   = _btn_link_act if show_link else {'padding': '7px 20px', 'fontSize': '13px', 'fontWeight': 'bold', 'border': 'none', 'borderLeft': '1px solid #dee2e6', 'backgroundColor': '#f8f9fa', 'color': '#495057', 'cursor': 'pointer'}
-    return node_style, link_style, node_btn, link_btn
-
-
-# ── 1b. Cache-availability hint (updates on σ change before user clicks) ────────
-
-@callback(
-    Output('link-stability-status', 'children', allow_duplicate=True),
-    Input('link-stability-sigma-selector', 'value'),
-    State('full-dataset-store', 'data'),
-    State('model-dropdown', 'value'),
-    prevent_initial_call=True,
-)
-def update_link_stability_hint(sigma, dataset, model_type):
-    if not dataset or not model_type or sigma is None:
-        return "Load a link-prediction model, set σ and click button  (⚡ instant if cache exists)"
-    dataset_name = dataset.get('name', '')
-    if link_stability_cache_exists(dataset_name, model_type, float(sigma)):
-        return f"⚡ Cache available for {dataset_name}/{model_type}/σ={sigma} — click to load instantly"
-    return f"No cache for {dataset_name}/{model_type}/σ={sigma} — click to compute & cache (one-time)"
-
-
-# ── 2. Run link stability ─────────────────────────────────────────────────────
-
-@callback(
-    Output('link-stability-results-store', 'data'),
-    Output('link-stability-status', 'children'),
-    Input('run-link-stability-button', 'n_clicks'),
-    State('link-stability-sigma-selector', 'value'),
-    State('link-stability-sample-size', 'value'),
-    State('precomputed-package-store', 'data'),
-    State('full-dataset-store', 'data'),
-    State('editable-graph-store', 'data'),
-    State('model-dropdown', 'value'),
-    prevent_initial_call=True,
-)
-def run_link_stability_callback(n_clicks, sigma, sample_size, package, dataset, graph_data, model_type):
-    import math as _math
-
-    if not n_clicks or not package or not dataset:
-        return no_update, "Load a link-prediction model first."
-
-    def _safe(v):
-        return None if isinstance(v, float) and (_math.isnan(v) or _math.isinf(v)) else v
-
-    try:
-        sigma       = float(sigma)     if sigma       is not None else 0.05
-        sample_size = int(sample_size) if sample_size is not None else 0
-
-        dataset_name = dataset.get('name', 'unknown')
-        _cache_key   = get_link_stability_cache_key(dataset_name, model_type or 'gcn', sigma)
-
-        # ── 1. Always try cache first ─────────────────────────────────────────
-        _cached = load_link_stability_cache(_cache_key)
-        if _cached is not None:
-            safe = [{k: _safe(v) for k, v in r.items()} for r in _cached]
-            # If user requested a sample, draw it from the cached full graph
-            if 0 < sample_size < len(safe):
-                idx  = np.random.choice(len(safe), size=sample_size, replace=False)
-                safe = [safe[i] for i in idx]
-                scope = f"{len(safe)} edges (sampled from cache)"
-            else:
-                scope = f"FULL GRAPH ({len(safe)} edges)"
-            n_ok = sum(1 for r in safe if r.get('correct'))
-            avg  = sum(r.get('stability', 0) or 0 for r in safe) / max(len(safe), 1)
-            return safe, (f"⚡ Loaded from cache · {scope} · σ={sigma} · "
-                          f"avg S={avg:.3f} · correct={n_ok}")
-
-        # ── 2. Cache miss — compute then save ─────────────────────────────────
-        model = get_cached_model(package, dataset['num_features'], dataset['num_classes'])
-        if model is None:
-            return [], "❌ Could not load model."
-        if not getattr(model, 'enable_link_prediction', False):
-            return [], "❌ Model does not have a link prediction head. Load a link-prediction model."
-
-        pyg_data = prepare_torch_data(dataset, graph_data, include_labels=True)
-        if pyg_data is None:
-            return [], "❌ Could not construct graph data."
-
-        results = run_link_stability_analysis(model, pyg_data, sigma, sample_size=0)
-
-        if not results:
-            return [], "⚠️ No results — check console logs."
-
-        safe_full = [{k: _safe(v) for k, v in r.items()} for r in results]
-        save_link_stability_cache(_cache_key, safe_full)
-
-        # Return sampled view if requested
-        safe = safe_full
-        if 0 < sample_size < len(safe_full):
-            idx  = np.random.choice(len(safe_full), size=sample_size, replace=False)
-            safe = [safe_full[i] for i in idx]
-            scope = f"{len(safe)} edges (sampled)"
-        else:
-            scope = f"FULL GRAPH ({len(safe)} edges)"
-
-        n_ok = sum(1 for r in safe if r.get('correct'))
-        avg  = sum(r.get('stability', 0) or 0 for r in safe) / max(len(safe), 1)
-        return safe, (f"✅ Computed and cached · {scope} · σ={sigma} · "
-                      f"avg S={avg:.3f} · correct={n_ok} / wrong={len(safe)-n_ok}")
-
-    except Exception as e:
-        import traceback as _tb
-        _tb.print_exc()
-        return [], f"❌ Error: {e}"
-
-
-# ── 3. Render link stability main plot ────────────────────────────────────────
-
-@callback(
-    Output('link-main-stability-plot', 'figure'),
-    Output('link-stability-stats-panel', 'children'),
-    Input('link-stability-results-store', 'data'),
-    Input('link-stability-plot-type', 'value'),
-    Input('link-stability-metric-selector', 'value'),
-)
-def render_link_stability_plots(results, plot_type, metric_type):
-    plot_type   = (plot_type   or 'scatter').strip().lower()
-    metric_type = (metric_type or 'confidence').strip().lower()
-
-    _empty_layout = dict(margin=dict(l=40, r=20, t=40, b=40), height=360,
-                         paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
-
-    if not results:
-        f = go.Figure(layout={**_empty_layout, 'title': 'Run Link Stability Analysis first'})
-        f.add_annotation(xref='paper', yref='paper', x=0.5, y=0.5,
-                         text='No data — click "Run Link Stability Analysis"',
-                         showarrow=False, font=dict(size=13, color='#999'),
-                         xanchor='center', yanchor='middle')
-        return f, html.Div("Run analysis to see statistics.", style={'color': '#999', 'textAlign': 'center', 'paddingTop': '10px'})
-
-    df = pd.DataFrame(results)
-    df['correct'] = df['correct'].apply(lambda v: bool(v))
-
-    _x_map = {
-        'confidence':       ('confidence',       'Confidence'),
-        'degree_sum':       ('degree_sum',        'Degree Sum (u+v)'),
-        'common_neighbors': ('common_neighbors',  'Common Neighbors'),
-    }
-    x_col, x_title = _x_map.get(metric_type, ('confidence', 'Confidence'))
-    y_col, y_title = 'stability', 'Stability (Jaccard)'
-    title          = f"{x_title} vs Stability"
-
-    color_map = {True: '#22c55e', False: '#ef4444'}
-    label_map = {True: 'Correct', False: 'Wrong'}
-
-    # ── helper: invisible overlay for hexbin/KDE drilldown ──────────────────
-    def _overlay(sub):
-        has_cn = 'common_neighbors' in sub.columns
-        custom = list(zip(
-            sub['source'].tolist(), sub['target'].tolist(),
-            sub['confidence'].tolist(),
-            sub['degree_sum'].tolist() if 'degree_sum' in sub.columns else [0]*len(sub),
-            sub['common_neighbors'].tolist() if has_cn else [0]*len(sub),
-        ))
-        return go.Scatter(
-            x=sub[x_col].tolist(), y=sub[y_col].tolist(),
-            mode='markers',
-            marker=dict(size=6, color='rgba(0,0,0,0)', opacity=0),
-            hovertemplate=(
-                '<b>Edge (%{customdata[0]}, %{customdata[1]})</b><br>'
-                f'{x_title}: %{{x:.4f}}<br>Stability: %{{y:.4f}}<br>'
-                'Confidence: %{customdata[2]:.4f}<br>'
-                'Degree Sum: %{customdata[3]}<br>'
-                'Common Neighbors: %{customdata[4]}'
-                '<br><i>Click to drill down</i><extra></extra>'
-            ),
-            customdata=custom, showlegend=False, name='_overlay',
-        )
-
-    # ── scatter with trend line ──────────────────────────────────────────────
-    def _scatter_plot():
-        sub = df.dropna(subset=[x_col, y_col]).copy()
-        sub[x_col] = sub[x_col].astype(float)
-        sub[y_col] = sub[y_col].astype(float)
-        if sub.empty:
-            f = go.Figure(layout={**_empty_layout, 'title': title})
-            f.add_annotation(xref='paper', yref='paper', x=0.5, y=0.5, text='No valid data',
-                             showarrow=False, font=dict(size=12, color='#999'), xanchor='center', yanchor='middle')
-            return f
-        fig = go.Figure()
-        for correct_val in [True, False]:
-            grp = sub[sub['correct'] == correct_val]
-            if grp.empty:
-                continue
-            custom = list(zip(grp['source'].tolist(), grp['target'].tolist(), grp['confidence'].tolist()))
-            fig.add_trace(go.Scatter(
-                x=grp[x_col].tolist(), y=grp[y_col].tolist(),
-                mode='markers', name=label_map[correct_val],
-                marker=dict(color=color_map[correct_val], size=5, opacity=0.6, line=dict(width=0.5, color='#fff')),
-                hovertemplate=(
-                    '<b>Edge (%{customdata[0]}, %{customdata[1]})</b><br>'
-                    f'{x_title}: %{{x:.4f}}<br>Stability: %{{y:.4f}}<br>'
-                    'Confidence: %{customdata[2]:.4f}<extra></extra>'
-                ),
-                customdata=custom,
-            ))
-        # Trend line
-        try:
-            from scipy.stats import linregress as _lr
-            x_arr, y_arr = sub[x_col].values.astype(float), sub[y_col].values.astype(float)
-            sl, ic, r, _, _ = _lr(x_arr, y_arr)
-            x_range = np.linspace(x_arr.min(), x_arr.max(), 100)
-            fig.add_trace(go.Scatter(x=x_range.tolist(), y=(sl * x_range + ic).tolist(),
-                                     mode='lines', name=f'Trend (r={r:.2f})',
-                                     line=dict(color='#6366f1', width=1.5, dash='dash'), showlegend=True))
-        except Exception:
-            pass
-        fig.update_layout(title=dict(text=title, font=dict(size=13)),
-                          xaxis_title=x_title, yaxis_title=y_title,
-                          margin=dict(l=45, r=15, t=42, b=40), height=360,
-                          paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
-                          legend=dict(font=dict(size=11)))
-        return fig
-
-    # ── hexbin ───────────────────────────────────────────────────────────────
-    def _hexbin_plot():
-        sub = df.dropna(subset=[x_col, y_col]).copy()
-        sub[x_col] = sub[x_col].astype(float)
-        sub[y_col] = sub[y_col].astype(float)
-        if sub.empty:
-            f = go.Figure(layout={**_empty_layout, 'title': title})
-            return f
-        fig = go.Figure()
-        fig.add_trace(go.Histogram2d(
-            x=sub[x_col].tolist(), y=sub[y_col].tolist(),
-            colorscale=[[0.0, 'rgba(68,1,84,0)'], [0.001, '#440154'], [0.25, '#31688e'], [0.5, '#35b779'], [1.0, '#fde725']],
-            nbinsx=28, nbinsy=28, zsmooth='best',
-            colorbar=dict(title=dict(text='Edge count', font=dict(size=11)), thickness=12, len=0.85),
-            hovertemplate=f'{x_title}: %{{x:.3f}}<br>Stability: %{{y:.3f}}<br>Count: %{{z}}<br><i>Click to explore</i><extra></extra>',
-            name='Density',
-        ))
-        fig.add_trace(_overlay(sub))
-        fig.update_layout(title=dict(text=title, font=dict(size=13)),
-                          xaxis_title=x_title, yaxis_title=y_title,
-                          margin=dict(l=45, r=15, t=42, b=40), height=360,
-                          paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
-        return fig
-
-    # ── KDE ──────────────────────────────────────────────────────────────────
-    def _kde_plot():
-        from scipy.stats import gaussian_kde as _gkde
-        sub = df.dropna(subset=[x_col, y_col]).copy()
-        sub[x_col] = sub[x_col].astype(float)
-        sub[y_col] = sub[y_col].astype(float)
-        if len(sub) < 5:
-            f = go.Figure(layout={**_empty_layout, 'title': title})
-            return f
-        fig = go.Figure()
-        try:
-            x_arr, y_arr = sub[x_col].values, sub[y_col].values
-            if np.std(x_arr) > 1e-9 and np.std(y_arr) > 1e-9:
-                kde_fn = _gkde(np.vstack([x_arr, y_arr]), bw_method='silverman')
-                xi = np.linspace(x_arr.min(), x_arr.max(), 80)
-                yi = np.linspace(y_arr.min(), y_arr.max(), 80)
-                xg, yg = np.meshgrid(xi, yi)
-                zi = kde_fn(np.vstack([xg.ravel(), yg.ravel()])).reshape(xg.shape)
-                zi = zi / zi.max() if zi.max() > 0 else zi
-                fig.add_trace(go.Contour(
-                    x=xi.tolist(), y=yi.tolist(), z=zi.tolist(),
-                    colorscale='Viridis', showscale=True, ncontours=15,
-                    colorbar=dict(title=dict(text='Density', font=dict(size=11)), thickness=12, len=0.85),
-                    hovertemplate=f'{x_title}: %{{x:.3f}}<br>Stability: %{{y:.3f}}<br><i>Click to explore</i><extra></extra>',
-                    name='KDE',
-                ))
-        except Exception as kde_err:
-            print(f"[LINK STABILITY PLOT] KDE failed: {kde_err}")
-        fig.add_trace(_overlay(sub))
-        fig.update_layout(title=dict(text=title, font=dict(size=13)),
-                          xaxis_title=x_title, yaxis_title=y_title,
-                          margin=dict(l=45, r=15, t=42, b=40), height=360,
-                          paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
-        return fig
-
-    if plot_type == 'hexbin':
-        fig = _hexbin_plot()
-    elif plot_type == 'kde':
-        fig = _kde_plot()
-    else:
-        fig = _scatter_plot()
-
-    # ── Stats panel ──────────────────────────────────────────────────────────
-    sub_c = df[df['correct'] == True]['stability'].dropna()
-    sub_w = df[df['correct'] == False]['stability'].dropna()
-    avg_c = float(sub_c.mean()) if len(sub_c) else float('nan')
-    avg_w = float(sub_w.mean()) if len(sub_w) else float('nan')
-    avg_all = float(df['stability'].dropna().mean())
-
-    def _stat_row(label, val):
-        return html.Tr([html.Td(label, style={'color': '#555', 'paddingRight': '12px', 'fontSize': '11px'}),
-                        html.Td(f"{val:.4f}" if isinstance(val, float) and not (val != val) else str(val),
-                                style={'fontWeight': 'bold', 'fontSize': '11px'})])
-
-    stats_table = html.Table([
-        html.Tbody([
-            _stat_row("Edges analysed",    len(df)),
-            _stat_row("Avg stability (all)", avg_all),
-            _stat_row("Avg stability (correct)", avg_c),
-            _stat_row("Avg stability (wrong)",   avg_w),
-            _stat_row("Correct predictions", sum(df['correct'])),
-            _stat_row("Avg confidence",   float(df['confidence'].mean())),
-            _stat_row("Avg degree sum",   float(df['degree_sum'].mean()) if 'degree_sum' in df.columns else 0),
-            _stat_row("Avg common neighbors", float(df['common_neighbors'].mean()) if 'common_neighbors' in df.columns else 0),
-        ])
-    ], style={'borderCollapse': 'collapse', 'width': '100%'})
-
-    return fig, stats_table
-
-
-# ── 4. Link drilldown: capture click, show panel ─────────────────────────────
-
-_LINK_HINTS = {
-    'hexbin':  'Click a hexbin cell → see individual edges in that region',
-    'kde':     'Click a KDE contour → see individual edges in that region',
-    'scatter': 'Click a scatter point → see nearest edges',
-}
-
-@callback(
-    Output('link-drilldown-click-store',  'data'),
-    Output('link-drilldown-hint',         'children'),
-    Output('link-drilldown-right-panel',  'style'),
-    Input('link-main-stability-plot',     'clickData'),
-    Input('link-drilldown-reset-btn',     'n_clicks'),
-    State('link-stability-plot-type',     'value'),
-    State('link-stability-metric-selector', 'value'),
-    State('link-stability-results-store', 'data'),
-    prevent_initial_call=True,
-)
-def update_link_drilldown_store(main_click, _reset, plot_type, metric_type, results):
-    plot_type = (plot_type or 'scatter').lower()
-    hint = _LINK_HINTS.get(plot_type, 'Click a plot region to drill down')
-    triggered = ctx.triggered_id
-
-    if triggered == 'link-drilldown-reset-btn':
-        return None, hint, _LINK_PANEL_HIDDEN
-
-    def _to_float(v):
-        if isinstance(v, (list, tuple)) and len(v) == 2:
-            return float((v[0] + v[1]) / 2)
-        return float(v)
-
-    def _extract_xy(payload):
-        if not payload:
-            return None, None
-        pt = payload['points'][0]
-        try:
-            return _to_float(pt.get('x')), _to_float(pt.get('y'))
-        except (TypeError, ValueError):
-            return None, None
-
-    def _snap_bin(x_val, y_val, x_col):
-        if plot_type != 'hexbin' or not results:
-            return x_val, y_val
-        try:
-            _df = pd.DataFrame(results).dropna(subset=[x_col, 'stability'])
-            _df[x_col]       = _df[x_col].astype(float)
-            _df['stability'] = _df['stability'].astype(float)
-            NBINS = 28
-            bw = (_df[x_col].max() - _df[x_col].min()) / NBINS or 1.0
-            bh = (_df['stability'].max() - _df['stability'].min()) / NBINS or 1.0
-            bi = max(0, min(NBINS-1, int((x_val - _df[x_col].min()) / bw)))
-            bj = max(0, min(NBINS-1, int((y_val - _df['stability'].min()) / bh)))
-            return _df[x_col].min() + (bi+0.5)*bw, _df['stability'].min() + (bj+0.5)*bh
-        except Exception:
-            return x_val, y_val
-
-    def _kde_density(x_val, y_val, x_col):
-        if plot_type != 'kde' or not results:
-            return None
-        try:
-            from scipy.stats import gaussian_kde as _gkde
-            _df = pd.DataFrame(results).dropna(subset=[x_col, 'stability'])
-            _x, _y = _df[x_col].values.astype(float), _df['stability'].values.astype(float)
-            if len(_df) < 5 or np.std(_x) < 1e-9 or np.std(_y) < 1e-9:
-                return None
-            kde_fn = _gkde(np.vstack([_x, _y]), bw_method='silverman')
-            return float(kde_fn(np.array([[x_val], [y_val]]))[0])
-        except Exception:
-            return None
-
-    if triggered == 'link-main-stability-plot':
-        if not main_click:
-            return no_update, hint, no_update
-        x_val, y_val = _extract_xy(main_click)
-        if x_val is None:
-            return no_update, hint, no_update
-
-        src_col = metric_type if metric_type in ('confidence', 'degree_sum', 'common_neighbors') else 'confidence'
-        x_val, y_val = _snap_bin(x_val, y_val, src_col)
-        density = _kde_density(x_val, y_val, src_col)
-        return (
-            {'x': x_val, 'y': y_val, 'source': src_col, 'plot_type': plot_type, 'clicked_density': density},
-            hint,
-            _LINK_PANEL_SHOWN,
-        )
-
-    return no_update, hint, no_update
-
-
-# ── 5. Link drilldown: render zoomed scatter ──────────────────────────────────
-
-@callback(
-    Output('link-drilldown-scatter',      'figure'),
-    Output('link-drilldown-panel-header', 'children'),
-    Input('link-drilldown-click-store',    'data'),
-    Input('link-drilldown-epsilon-slider', 'value'),
-    Input('link-stability-plot-type',      'value'),
-    State('link-stability-results-store',  'data'),
-    prevent_initial_call=True,
-)
-def render_link_drilldown_scatter(click_data, epsilon, plot_type, results):
-    plot_type = (plot_type or 'scatter').lower()
-    eps = float(epsilon) if epsilon is not None else 0.08
-
-    def _empty(text, color='#aaa'):
-        f = go.Figure(layout=dict(height=400, margin=dict(l=45, r=15, t=40, b=40),
-                                  paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)'))
-        f.add_annotation(xref='paper', yref='paper', x=0.5, y=0.5, text=text,
-                         showarrow=False, font=dict(size=13, color=color),
-                         xanchor='center', yanchor='middle')
-        return f
-
-    if not click_data:
-        return _empty(_LINK_HINTS.get(plot_type, 'Click a region above')), "Click a region to explore edges"
-    if not results:
-        return _empty('Run Link Stability Analysis first', '#999'), "No data"
-
-    df = pd.DataFrame(results)
-    required = {'confidence', 'stability', 'source', 'target'}
-    if required - set(df.columns):
-        return _empty('Missing columns'), "Data error"
-
-    src_col  = click_data.get('source', 'confidence')
-    x_col    = src_col if src_col in df.columns else 'confidence'
-    x_click  = click_data['x']
-    y_click  = click_data['y']
-    _x_labels = {'confidence': 'Confidence', 'degree_sum': 'Degree Sum', 'common_neighbors': 'Common Neighbors'}
-    x_label  = _x_labels.get(x_col, x_col)
-
-    df = df.dropna(subset=[x_col, 'stability']).copy()
-    df[x_col]       = df[x_col].astype(float)
-    df['stability'] = df['stability'].astype(float)
-    x_arr = df[x_col].values
-    y_arr = df['stability'].values
-
-    if plot_type == 'kde':
-        clicked_density = click_data.get('clicked_density')
-        kde_mask_ok = False
-        if clicked_density and clicked_density > 0:
-            try:
-                from scipy.stats import gaussian_kde as _gkde
-                if np.std(x_arr) > 1e-9 and np.std(y_arr) > 1e-9:
-                    kde_fn = _gkde(np.vstack([x_arr, y_arr]), bw_method='silverman')
-                    nd     = kde_fn(np.vstack([x_arr, y_arr]))
-                    mask   = (nd >= clicked_density * 0.7) & (nd <= clicked_density * 1.3)
-                    kde_band = (clicked_density * 0.7, clicked_density * 1.3)
-                    kde_mask_ok = True
-            except Exception:
-                pass
-        if not kde_mask_ok:
-            mask = ((x_arr >= x_click - eps) & (x_arr <= x_click + eps) &
-                    (y_arr >= y_click - eps) & (y_arr <= y_click + eps))
-            kde_band = None
-    elif plot_type == 'hexbin':
-        dist = np.sqrt((x_arr - x_click)**2 + (y_arr - y_click)**2)
-        mask = dist <= eps
-    else:
-        mask = ((x_arr >= x_click - eps) & (x_arr <= x_click + eps) &
-                (y_arr >= y_click - eps) & (y_arr <= y_click + eps))
-
-    subset   = df[mask].copy()
-    n_total  = len(df)
-    n_subset = len(subset)
-
-    if plot_type == 'kde':
-        if kde_mask_ok and kde_band:
-            header = f"KDE Region · density ∈ [{kde_band[0]:.5f}, {kde_band[1]:.5f}] · {n_subset}/{n_total} edges"
-        else:
-            header = f"KDE Region (ε-box fallback) · {n_subset}/{n_total} edges"
-    elif plot_type == 'hexbin':
-        header = f"Hexbin Region · center ({x_click:.3f}, {y_click:.3f}) · ε={eps:.2f} · {n_subset}/{n_total} edges"
-    else:
-        header = f"Region · {x_label} ∈ [{x_click-eps:.3f}, {x_click+eps:.3f}] · Stability ∈ [{y_click-eps:.3f}, {y_click+eps:.3f}] · {n_subset}/{n_total} edges"
-
-    if subset.empty:
-        return _empty(f'No edges in region (ε={eps:.2f}) — try larger ε', '#999'), header
-
-    color_map = {True: '#22c55e', False: '#ef4444'}
-    label_map = {True: 'Correct', False: 'Wrong'}
-    has_deg   = 'degree_sum' in subset.columns
-    has_cn    = 'common_neighbors' in subset.columns
-
-    fig = go.Figure()
-    for cv in [True, False]:
-        grp = subset[subset['correct'] == cv]
-        if grp.empty:
-            continue
-        custom = list(zip(
-            grp['source'].tolist(), grp['target'].tolist(),
-            grp['confidence'].tolist(),
-            grp['degree_sum'].tolist() if has_deg else [0]*len(grp),
-            grp['common_neighbors'].tolist() if has_cn else [0]*len(grp),
-        ))
-        fig.add_trace(go.Scatter(
-            x=grp[x_col].tolist(), y=grp['stability'].tolist(),
-            mode='markers', name=label_map[cv],
-            marker=dict(color=color_map[cv], size=7, opacity=0.75, line=dict(width=0.6, color='#fff')),
-            hovertemplate=(
-                '<b>Edge (%{customdata[0]}, %{customdata[1]})</b><br>'
-                f'{x_label}: %{{x:.4f}}<br>Stability: %{{y:.4f}}<br>'
-                'Confidence: %{customdata[2]:.4f}<br>'
-                'Degree Sum: %{customdata[3]}<br>'
-                'Common Neighbors: %{customdata[4]}<extra></extra>'
-            ),
-            customdata=custom,
-        ))
-
-    if plot_type == 'kde':
-        fig.add_shape(type='line', xref='x', yref='paper', x0=x_click, x1=x_click, y0=0, y1=1,
-                      line=dict(color='#8e44ad', width=1.5, dash='dot'))
-        fig.add_shape(type='line', xref='paper', yref='y', x0=0, x1=1, y0=y_click, y1=y_click,
-                      line=dict(color='#8e44ad', width=1.5, dash='dot'))
-    elif plot_type == 'hexbin':
-        fig.add_shape(type='circle', xref='x', yref='y',
-                      x0=x_click-eps, x1=x_click+eps, y0=y_click-eps, y1=y_click+eps,
-                      line=dict(color='#22c55e', width=1.5, dash='dash'), fillcolor='rgba(34,197,94,0.04)')
-    else:
-        fig.add_shape(type='rect', xref='x', yref='y',
-                      x0=x_click-eps, x1=x_click+eps, y0=y_click-eps, y1=y_click+eps,
-                      line=dict(color='#22c55e', width=1.5, dash='dash'), fillcolor='rgba(34,197,94,0.04)')
-
-    fig.update_layout(
-        xaxis_title=x_label, yaxis_title='Stability (Jaccard)',
-        margin=dict(l=45, r=15, t=40, b=40), height=400,
-        paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
-        legend=dict(font=dict(size=11)),
-    )
-    return fig, header
 
 
 # --- Run Application ---
