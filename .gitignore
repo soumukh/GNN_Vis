@@ -1,0 +1,14 @@
+# Data, trained models and caches (large / regenerable — see README "Offline Phase")
+data/
+models/
+subgraph_models/
+stability_cache/
+
+# Generated outputs and logs
+*.log
+link_predictions.json
+
+# Python / tooling
+__pycache__/
+*.pyc
+.claude/

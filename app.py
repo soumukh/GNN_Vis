@@ -25,6 +25,10 @@ If you split logic into new files, update the TASK MAP above and add
 import stubs at the top.
 """
 
+# torch must be imported before dash: on Windows, loading dash first makes
+# torch's c10.dll fail to initialise (WinError 1114).
+import torch
+
 import dash
 
 from dash import dcc, html, Input, Output, State, callback, ctx, no_update, ALL, dash_table
@@ -345,39 +349,8 @@ def get_package_target_identifier(package_meta):
     return f"{package_meta.get('model_type')}::{package_meta.get('dataset_name')}"
 
 
-def link_stability_cache_exists(dataset_name: str, model_type: str, sigma: float) -> bool:
-    """Return True if a precomputed link-stability file exists for this combination."""
-    key  = get_link_stability_cache_key(dataset_name, model_type, sigma)
-    stem = f"stability_{key.replace('.', '_').replace(' ', '_')}"
-    return (
-        os.path.exists(os.path.join(STABILITY_CACHE_DIR, stem + '.parquet')) or
-        os.path.exists(os.path.join(STABILITY_CACHE_DIR, stem + '.pkl'))
-    )
-
-
-def _scan_link_stability_cache() -> None:
-    """Print a summary of available link-stability cache files at startup."""
-    files = [f for f in os.listdir(STABILITY_CACHE_DIR)
-             if f.startswith('stability_link_') and (f.endswith('.parquet') or f.endswith('.pkl'))]
-    if not files:
-        print("[LINK STABILITY CACHE] No precomputed files found in stability_cache/")
-        print("  Run:  python precompute_link_stability.py")
-        return
-    print(f"[LINK STABILITY CACHE] {len(files)} precomputed file(s) available:")
-    for fname in sorted(files):
-        fpath = os.path.join(STABILITY_CACHE_DIR, fname)
-        size_kb = os.path.getsize(fpath) // 1024
-        try:
-            if fname.endswith('.parquet'):
-                n = len(pd.read_parquet(fpath))
-            else:
-                with open(fpath, 'rb') as fh:
-                    n = len(pickle.load(fh))
-            print(f"  ✓ {fname}  ({n} edges, {size_kb} KB)")
-        except Exception:
-            print(f"  ? {fname}  ({size_kb} KB, unreadable)")
-
-# Link stability cache helpers moved to `app_stability.py`.
+# Link stability cache helpers (link_stability_cache_exists, _scan_link_stability_cache)
+# live in `app_stability.py` and are imported above.
 # Use functions from the module instead of local definitions.
 
 
@@ -3480,14 +3453,24 @@ def load_initial_data(dataset_name, model_type):
         }
         editable_graph = {'edge_index': dataset['original_edge_index'].cpu().tolist()}
 
-        # Get predictions
+        # Get predictions by live inference on the full graph, so the initial view
+        # matches what later re-predictions (after graph edits) compute. The saved
+        # package predictions can come from the training graph (GCN cached=True)
+        # and carry no confidences.
 
-        predictions = package.get('predictions', [])
-        confidences = package.get('confidences', [])
+        initial_predictions = None
+        model = get_cached_model(package_meta, dataset['num_features'], dataset['num_classes'])
+        if model is not None:
+            pyg_data = prepare_torch_data(dataset_meta, None, include_labels=False)
+            if pyg_data is not None:
+                initial_predictions = run_inference(model, pyg_data)
+        if initial_predictions is None:
+            print("WARNING: Live inference failed; falling back to saved package predictions")
+            initial_predictions = {'preds': package.get('predictions', []),
+                                   'confidences': package.get('confidences', [])}
+        predictions = initial_predictions['preds']
         if not predictions:
-            print("WARNING: No predictions found in package")
-
-        initial_predictions = {'preds': predictions, 'confidences': confidences}
+            print("WARNING: No predictions available")
 
         print(f"SUCCESS: {model_type} model loaded successfully for {dataset_name}")
 
@@ -3543,7 +3526,8 @@ def update_edges(add_clicks, remove_clicks, add_clicks_lp, remove_clicks_lp, sou
 
         return no_update, {'text': 'Node ID out of range.', 'type': 'error'}
 
-    edge_index = graph_data['edge_index']
+    # Copy so the State object is never mutated in place
+    edge_index = [list(graph_data['edge_index'][0]), list(graph_data['edge_index'][1])]
 
     triggered_id = ctx.triggered_id
 
@@ -3551,13 +3535,17 @@ def update_edges(add_clicks, remove_clicks, add_clicks_lp, remove_clicks_lp, sou
 
     if triggered_id in ['add-edge-button-nc', 'add-edge-button-lp']:
 
-        if ([source, target] not in list(zip(edge_index[0], edge_index[1]))):
+        if (source, target) not in set(zip(edge_index[0], edge_index[1])):
 
              edge_index[0].extend([source, target])
 
              edge_index[1].extend([target, source])
 
              status = {'text': f'Added edge {source}-{target}. Re-running model...', 'type': 'info'}
+
+        else:
+
+             return no_update, {'text': f'Edge {source}-{target} already exists.', 'type': 'info'}
 
     elif triggered_id in ['remove-edge-button-nc', 'remove-edge-button-lp']:
 
@@ -3577,9 +3565,13 @@ def update_edges(add_clicks, remove_clicks, add_clicks_lp, remove_clicks_lp, sou
 
                 removed = True
 
+        if not removed:
+
+            return no_update, {'text': f'Edge {source}-{target} does not exist.', 'type': 'info'}
+
         edge_index = new_edge_index
 
-        if removed: status = {'text': f'Removed edge {source}-{target}. Re-running model...', 'type': 'info'}
+        status = {'text': f'Removed edge {source}-{target}. Re-running model...', 'type': 'info'}
 
     return {'edge_index': edge_index}, status
 
@@ -3640,7 +3632,8 @@ def update_selected_node(tapNode, emb_click):
 
     if node_id is not None:
         print(f"[SELECTED_NODE] update_selected_node triggered by {trigger_id}, node_id={node_id}")
-        return {'id': node_id}
+        # Store ids as strings everywhere (Cytoscape ids are strings)
+        return {'id': str(node_id)}
     else:
         print(f"[SELECTED_NODE] update_selected_node triggered by {trigger_id}, no node selected")
         return no_update
@@ -3876,7 +3869,7 @@ def generate_link_explanation_on_select(selected_link, run_clicks, graph_data, p
 
         print(f"ERROR in generate_link_explanation_on_select: {e}")
 
-        return {'error': f'On-select explanation failed: {str(e)}'}
+        return {'error': f'On-select explanation failed: {str(e)}'}, no_update
 
 @callback(
 
@@ -3915,16 +3908,22 @@ def run_explainer(n_clicks, selected_node, selected_link, lp_inputs, graph_data,
         if n_clicks == 0:
             return no_update, no_update, no_update
 
-        if not all([package_meta, dataset_meta, graph_data, predictions_data]):
+        # Link mode: run_link_prediction_unified owns the run-button reset
+        if analysis_mode != 'node_classification':
             return no_update, no_update, no_update
 
-        if analysis_mode != 'node_classification' or active_layer3_tab == 'tab-stability':
-            return no_update, no_update, no_update
+        # From here on this callback must always re-enable the run button,
+        # otherwise the clientside "Processing..." state never clears.
+        if not all([package_meta, dataset_meta, graph_data, predictions_data]):
+            return no_update, "RUN ANALYSIS", False
+
+        if active_layer3_tab == 'tab-stability':
+            return no_update, "RUN ANALYSIS", False
 
         dataset = get_cached_dataset_if_missing(dataset_meta)
         package = get_cached_package_if_missing(package_meta)
         if not dataset or not package:
-            return no_update, no_update, no_update
+            return no_update, "RUN ANALYSIS", False
 
         print(f"Running explainer with {model_type} model in {analysis_mode} mode...")
 
@@ -3934,10 +3933,16 @@ def run_explainer(n_clicks, selected_node, selected_link, lp_inputs, graph_data,
             return no_update, "RUN ANALYSIS", False
 
         if analysis_mode == 'node_classification' and selected_node and selected_node.get('id') is not None:
-            node_idx = int(selected_node['id'])
+            try:
+                node_idx = int(selected_node['id'])
+            except (TypeError, ValueError):
+                return {'error': f"Invalid node ID: {selected_node['id']}"}, "RUN ANALYSIS", False
+            num_nodes = dataset_meta.get('num_nodes') or len(predictions_data.get('preds', []))
+            if not (0 <= node_idx < num_nodes):
+                return {'error': f"Node {node_idx} is out of range (0-{num_nodes - 1})."}, "RUN ANALYSIS", False
             pyg_data = prepare_torch_data(dataset_meta, graph_data, include_labels=False)
             if pyg_data is None:
-                return no_update, no_update, no_update
+                return no_update, "RUN ANALYSIS", False
             target = torch.tensor([predictions_data['preds'][node_idx]], device=device)
             explainer = Explainer(model=model, algorithm=GNNExplainer(epochs=100), explanation_type='model', edge_mask_type='object', model_config=dict(mode='multiclass_classification', task_level='node', return_type='log_probs'))
             explanation = explainer(x=pyg_data.x, edge_index=pyg_data.edge_index, target=target, index=node_idx)
@@ -6468,7 +6473,12 @@ def run_stability_callback(n_clicks, sigma, sample_size,
 
         # ── Cache check (only cache full-graph runs; sampled runs are not cached) ──
         dataset_name = dataset.get('name', 'unknown')
-        _use_cache   = (sample_size == 0)          # only cache full-graph results
+        # Only cache full-graph results on the *unedited* graph: the cache key has no
+        # notion of user edge edits, so an edited graph must always be recomputed.
+        _graph_edited = bool(graph_data) and graph_data.get('edge_index') != dataset.get('original_edge_index')
+        _use_cache   = (sample_size == 0) and not _graph_edited
+        if _graph_edited:
+            print("[STABILITY] Graph has been edited — bypassing stability cache")
 
         # If analysis mode indicates link prediction, run link-stability branch
         mode = (analysis_mode or '').lower()
@@ -7853,4 +7863,8 @@ if __name__ == '__main__':
     _scan_link_stability_cache()
     # Disable the Werkzeug auto-reloader on Windows to avoid select() socket errors
     # (WinError 10038) caused by the reloader thread closing sockets unexpectedly.
-    app.run(debug=True, host='0.0.0.0', port=8050, use_reloader=False)
+    # Bind to localhost by default: debug mode exposes the Werkzeug debugger, which
+    # allows code execution. Set GNN_VIS_HOST=0.0.0.0 / GNN_VIS_DEBUG=0 to change.
+    _host = os.environ.get('GNN_VIS_HOST', '127.0.0.1')
+    _debug = os.environ.get('GNN_VIS_DEBUG', '1') == '1'
+    app.run(debug=_debug, host=_host, port=8050, use_reloader=False)

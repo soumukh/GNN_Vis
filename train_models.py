@@ -12,6 +12,7 @@ from sklearn.manifold import TSNE
 from sklearn.decomposition import PCA
 import umap.umap_ as umap
 import warnings
+from link_prediction_utils import create_edge_splits, evaluate_link_prediction, generate_negative_samples
 
 # --- Configuration ---
 MODEL_DIR = 'models'
@@ -31,13 +32,13 @@ EARLY_STOPPING_PATIENCE = 50
 
 # --- Model-Specific Hyperparameters ---
 GCN_CONFIG = {
-    'Cora': {'lr': 0.01, 'weight_decay': 5e-4, 'hidden_channels': 32, 'dropout_rate': 0.5},
-    'CiteSeer': {'lr': 0.01, 'weight_decay': 0.01, 'hidden_channels': 32, 'dropout_rate': 0.5}
+    'Cora': {'lr': 0.01, 'weight_decay': 5e-4, 'hidden_channels': 32, 'dropout_rate': 0.5, 'enable_link_prediction': True, 'link_pred_weight': 0.3},
+    'CiteSeer': {'lr': 0.01, 'weight_decay': 0.01, 'hidden_channels': 32, 'dropout_rate': 0.5, 'enable_link_prediction': True, 'link_pred_weight': 0.3}
 }
 
 GAT_CONFIG = {
-    'Cora': {'lr': 0.005, 'weight_decay': 5e-4, 'hidden_channels': 8, 'heads': 8, 'dropout_rate': 0.6},
-    'CiteSeer': {'lr': 0.005, 'weight_decay': 5e-4, 'hidden_channels': 8, 'heads': 8, 'dropout_rate': 0.6}
+    'Cora': {'lr': 0.005, 'weight_decay': 5e-4, 'hidden_channels': 8, 'heads': 8, 'dropout_rate': 0.6, 'enable_link_prediction': True, 'link_pred_weight': 0.3},
+    'CiteSeer': {'lr': 0.005, 'weight_decay': 5e-4, 'hidden_channels': 8, 'heads': 8, 'dropout_rate': 0.6, 'enable_link_prediction': True, 'link_pred_weight': 0.3}
 }
 
 # --- GPU Device Setup ---
@@ -59,18 +60,52 @@ os.makedirs(processed_data_abs_dir, exist_ok=True)
 # --- Model Definitions ---
 class GCNNet(torch.nn.Module):
     """A standard two-layer GCN model with an inference method."""
-    def __init__(self, in_channels, hidden_channels, out_channels, dropout_rate=0.5):
+    def __init__(self, in_channels, hidden_channels, out_channels, dropout_rate=0.5, enable_link_prediction=False):
         super().__init__()
-        self.conv1 = GCNConv(in_channels, hidden_channels, cached=True)
-        self.conv2 = GCNConv(hidden_channels, out_channels, cached=True)
+        # No cached=True: the model is trained on the link-prediction training
+        # graph but evaluated / pre-computed on the full graph. A cached GCNConv
+        # would silently keep reusing the first graph's normalised adjacency.
+        self.conv1 = GCNConv(in_channels, hidden_channels)
+        self.conv2 = GCNConv(hidden_channels, out_channels)
         self.dropout_rate = dropout_rate
-        self.init_args = {'hidden_channels': hidden_channels, 'dropout_rate': dropout_rate}
+        self.enable_link_prediction = enable_link_prediction
+        self.init_args = {'hidden_channels': hidden_channels, 'dropout_rate': dropout_rate, 'enable_link_prediction': enable_link_prediction}
+        
+        # Link prediction head
+        if enable_link_prediction:
+            self.link_predictor = torch.nn.Sequential(
+                torch.nn.Linear(hidden_channels * 2, hidden_channels),
+                torch.nn.ReLU(),
+                torch.nn.Dropout(dropout_rate),
+                torch.nn.Linear(hidden_channels, 1)
+            )
 
-    def forward(self, x, edge_index):
+    def forward(self, x, edge_index, return_embeddings=False):
         x = F.relu(self.conv1(x, edge_index))
         x = F.dropout(x, p=self.dropout_rate, training=self.training)
+        embeddings = x  # Capture embeddings for link prediction
         x = self.conv2(x, edge_index)
-        return F.log_softmax(x, dim=1)
+        node_output = F.log_softmax(x, dim=1)
+        
+        if return_embeddings:
+            return node_output, embeddings
+        return node_output
+    
+    def predict_links(self, embeddings, edge_index):
+        """Predict link scores for given edge pairs."""
+        if not self.enable_link_prediction:
+            raise ValueError("Link prediction not enabled for this model")
+        
+        # Get embeddings for source and target nodes
+        source_emb = embeddings[edge_index[0]]
+        target_emb = embeddings[edge_index[1]]
+        
+        # Concatenate embeddings
+        edge_features = torch.cat([source_emb, target_emb], dim=1)
+        
+        # Predict link scores
+        link_scores = self.link_predictor(edge_features)
+        return link_scores.squeeze()
 
     @torch.no_grad()
     def inference(self, data):
@@ -85,19 +120,50 @@ class GCNNet(torch.nn.Module):
 
 class GATNet(torch.nn.Module):
     """A standard two-layer GAT model with an inference method."""
-    def __init__(self, in_channels, hidden_channels, out_channels, heads=8, dropout_rate=0.6):
+    def __init__(self, in_channels, hidden_channels, out_channels, heads=8, dropout_rate=0.6, enable_link_prediction=False):
         super().__init__()
         self.conv1 = GATConv(in_channels, hidden_channels, heads=heads, dropout=dropout_rate)
         self.conv2 = GATConv(hidden_channels * heads, out_channels, heads=1, concat=False, dropout=dropout_rate)
         self.dropout_rate = dropout_rate
-        self.init_args = {'hidden_channels': hidden_channels, 'heads': heads, 'dropout_rate': dropout_rate}
+        self.enable_link_prediction = enable_link_prediction
+        self.init_args = {'hidden_channels': hidden_channels, 'heads': heads, 'dropout_rate': dropout_rate, 'enable_link_prediction': enable_link_prediction}
+        
+        # Link prediction head
+        if enable_link_prediction:
+            self.link_predictor = torch.nn.Sequential(
+                torch.nn.Linear(hidden_channels * heads * 2, hidden_channels * heads),
+                torch.nn.ReLU(),
+                torch.nn.Dropout(dropout_rate),
+                torch.nn.Linear(hidden_channels * heads, 1)
+            )
 
-    def forward(self, x, edge_index):
+    def forward(self, x, edge_index, return_embeddings=False):
         x = F.dropout(x, p=self.dropout_rate, training=self.training)
         x = F.elu(self.conv1(x, edge_index))
         x = F.dropout(x, p=self.dropout_rate, training=self.training)
+        embeddings = x  # Capture embeddings for link prediction
         x = self.conv2(x, edge_index)
-        return F.log_softmax(x, dim=1)
+        node_output = F.log_softmax(x, dim=1)
+        
+        if return_embeddings:
+            return node_output, embeddings
+        return node_output
+    
+    def predict_links(self, embeddings, edge_index):
+        """Predict link scores for given edge pairs."""
+        if not self.enable_link_prediction:
+            raise ValueError("Link prediction not enabled for this model")
+        
+        # Get embeddings for source and target nodes
+        source_emb = embeddings[edge_index[0]]
+        target_emb = embeddings[edge_index[1]]
+        
+        # Concatenate embeddings
+        edge_features = torch.cat([source_emb, target_emb], dim=1)
+        
+        # Predict link scores
+        link_scores = self.link_predictor(edge_features)
+        return link_scores.squeeze()
 
     @torch.no_grad()
     def inference(self, data, return_attention_weights=False):
@@ -174,6 +240,58 @@ def train_one_epoch(model, data, optimizer):
     optimizer.step()
     return loss.item()
 
+def train_one_epoch_with_links(model, data, pos_edges, neg_edges, optimizer, config):
+    """Training step with both node classification and link prediction."""
+    model.train()
+    optimizer.zero_grad()
+    
+    # Node classification loss
+    node_output, embeddings = model(data.x, data.edge_index, return_embeddings=True)
+    node_loss = F.nll_loss(node_output[data.train_mask], data.y[data.train_mask])
+    
+    total_loss = node_loss
+    
+    # Link prediction loss (if enabled)
+    if model.enable_link_prediction and pos_edges.size(1) > 0 and neg_edges.size(1) > 0:
+        # Positive edges
+        pos_scores = model.predict_links(embeddings, pos_edges)
+        pos_targets = torch.ones(pos_scores.size(0), device=pos_scores.device)
+        
+        # Negative edges
+        neg_scores = model.predict_links(embeddings, neg_edges)
+        neg_targets = torch.zeros(neg_scores.size(0), device=neg_scores.device)
+        
+        # Combine and compute link prediction loss
+        all_scores = torch.cat([pos_scores, neg_scores])
+        all_targets = torch.cat([pos_targets, neg_targets])
+        link_loss = F.binary_cross_entropy_with_logits(all_scores, all_targets)
+        
+        # Combined loss
+        alpha = config.get('link_pred_weight', 0.3)
+        total_loss = (1 - alpha) * node_loss + alpha * link_loss
+    
+    total_loss.backward()
+    optimizer.step()
+    return total_loss.item()
+
+def evaluate_link_prediction_model(model, data, pos_edges, neg_edges):
+    """Evaluate link prediction performance."""
+    model.eval()
+    with torch.no_grad():
+        _, embeddings = model(data.x, data.edge_index, return_embeddings=True)
+        
+        if pos_edges.size(1) > 0 and neg_edges.size(1) > 0:
+            pos_scores = model.predict_links(embeddings, pos_edges)
+            neg_scores = model.predict_links(embeddings, neg_edges)
+            
+            # Apply sigmoid to get probabilities
+            pos_scores = torch.sigmoid(pos_scores)
+            neg_scores = torch.sigmoid(neg_scores)
+            
+            return evaluate_link_prediction(pos_scores, neg_scores)
+        else:
+            return {'auc': 0.0, 'ap': 0.0, 'accuracy': 0.0, 'precision': 0.0, 'recall': 0.0, 'f1': 0.0}
+
 @torch.no_grad()
 def evaluate(model, data, mask):
     """Evaluates the model on a given data mask and returns accuracy."""
@@ -195,13 +313,20 @@ if __name__ == '__main__':
         data = dataset.data.to(device)
         print(f"  Dataset '{dataset_name}' on {device}. Nodes: {data.num_nodes}, Features: {dataset.num_node_features}, Classes: {dataset.num_classes}")
         print(f"  Train: {data.train_mask.sum()}, Val: {data.val_mask.sum()}, Test: {data.test_mask.sum()}")
+        
+        # Prepare link prediction data if any model uses it
+        link_data = None
+        if any(config.get('enable_link_prediction', False) for config in [GCN_CONFIG[dataset_name], GAT_CONFIG[dataset_name]]):
+            print(f"  Preparing link prediction data...")
+            link_data = create_edge_splits(data, val_ratio=0.05, test_ratio=0.15)
+            print(f"    Train edges: {link_data['num_train_edges']}, Val edges: {link_data['num_val_edges']}, Test edges: {link_data['num_test_edges']}")
 
         for model_type in MODELS_TO_TRAIN:
             print(f"\n  -- Training Model: {model_type} --")
             start_time = time.time()
             
             config = (GCN_CONFIG if model_type == 'GCN' else GAT_CONFIG)[dataset_name]
-            model_params = {k: v for k, v in config.items() if k not in ['lr', 'weight_decay']}
+            model_params = {k: v for k, v in config.items() if k not in ['lr', 'weight_decay', 'link_pred_weight']}
 
             if model_type == 'GCN':
                 model = GCNNet(in_channels=dataset.num_node_features,
@@ -223,9 +348,39 @@ if __name__ == '__main__':
             epochs_no_improve = 0
             best_model_state = None
 
+            # Prepare training data based on whether link prediction is enabled
+            if model.enable_link_prediction and link_data:
+                train_data = link_data['train_data'].to(device)
+                # Generate negative samples for training
+                train_neg_edges = generate_negative_samples(
+                    link_data['train_edge_index'], 
+                    data.num_nodes, 
+                    link_data['train_edge_index'].size(1) // 2  # Same number as positive edges
+                ).to(device)
+                # Use only a subset of positive edges for training to balance
+                train_pos_edges = link_data['train_edge_index'][:, ::2].to(device)  # Every other edge
+                print(f"    Link prediction enabled. Training with {train_pos_edges.size(1)} pos edges, {train_neg_edges.size(1)} neg edges")
+            else:
+                train_data = data
+                train_pos_edges = torch.empty(2, 0, dtype=torch.long, device=device)
+                train_neg_edges = torch.empty(2, 0, dtype=torch.long, device=device)
+
             for epoch in range(1, EPOCHS + 1):
-                train_loss = train_one_epoch(model, data, optimizer)
+                if model.enable_link_prediction and link_data:
+                    train_loss = train_one_epoch_with_links(model, train_data, train_pos_edges, train_neg_edges, optimizer, config)
+                else:
+                    train_loss = train_one_epoch(model, data, optimizer)
+                
                 val_acc = evaluate(model, data, data.val_mask)
+                
+                # Evaluate link prediction if enabled
+                if model.enable_link_prediction and link_data and epoch % 50 == 0:
+                    link_metrics = evaluate_link_prediction_model(
+                        model, train_data, 
+                        link_data['val_pos_edges'].to(device), 
+                        link_data['val_neg_edges'].to(device)
+                    )
+                    print(f"    Link Pred - AUC: {link_metrics['auc']:.4f}, AP: {link_metrics['ap']:.4f}")
                 
                 scheduler.step(val_acc)
 
@@ -290,6 +445,7 @@ if __name__ == '__main__':
                 'model_state_dict': best_model_state,
                 'model_init_args': model.init_args,
                 'predictions': predictions.cpu().tolist(),
+                'confidences': log_probs.exp().max(dim=1).values.cpu().tolist(),
                 'embeddings': embeddings.cpu().tolist(), # High-dimensional embeddings
                 'embeddings_2d': {
                     'pca': pca_2d.tolist(),
@@ -307,6 +463,28 @@ if __name__ == '__main__':
                     'conv1': (att1[0].cpu().tolist(), att1[1].cpu().tolist()),
                     'conv2': (att2[0].cpu().tolist(), att2[1].cpu().tolist())
                 }
+            
+            # Add link prediction results if enabled
+            if model.enable_link_prediction and link_data:
+                print("    5. Computing link prediction results...")
+                # Final evaluation on test set
+                final_link_metrics = evaluate_link_prediction_model(
+                    model, train_data if model.enable_link_prediction else data,
+                    link_data['test_pos_edges'].to(device),
+                    link_data['test_neg_edges'].to(device)
+                )
+                save_package['link_prediction'] = {
+                    'enabled': True,
+                    'test_metrics': final_link_metrics,
+                    'edge_splits': {
+                        'num_train_edges': link_data['num_train_edges'],
+                        'num_val_edges': link_data['num_val_edges'],
+                        'num_test_edges': link_data['num_test_edges']
+                    }
+                }
+                print(f"    Final Link Prediction - AUC: {final_link_metrics['auc']:.4f}, AP: {final_link_metrics['ap']:.4f}")
+            else:
+                save_package['link_prediction'] = {'enabled': False}
 
             # 4. Save the comprehensive package to disk
             model_filename = f"{model_type}_{dataset_name}_tuned.pkl"

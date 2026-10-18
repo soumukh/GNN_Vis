@@ -11,7 +11,7 @@ import warnings
 warnings.filterwarnings("ignore")
 
 # Define Paths
-SCRIPT_DIR = os.getcwd()
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))  # not cwd: imported by other scripts
 MODEL_DIR = 'models'
 DATA_DIR = 'data'
 MODEL_ABS_DIR = os.path.join(SCRIPT_DIR, MODEL_DIR)
@@ -114,7 +114,9 @@ def instantiate_model(package, model_type, num_features, num_classes):
             model = GCNNet(in_channels=num_features, out_channels=num_classes, **model_args)
         elif model_type == 'GAT':
             model = GATNet(in_channels=num_features, out_channels=num_classes, **model_args)
-        
+        else:
+            raise ValueError(f"Unknown model type: {model_type}")
+
         state_dict = package.get('model_state_dict', {})
         state_dict = {key: torch.tensor(value) if isinstance(value, list) else value 
                      for key, value in state_dict.items()}

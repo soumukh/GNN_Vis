@@ -162,12 +162,28 @@ def _get_edge_mask(explanation):
 
 # Node-level explainer stability
 
-def run_stability_analysis(model, data, predictions_data, sigma, sample_size):
+def _model_device(model):
+    """Device the model's parameters live on (falls back to CPU)."""
+    try:
+        return next(model.parameters()).device
+    except StopIteration:
+        return torch.device('cpu')
+
+
+def run_stability_analysis(model, data, predictions_data, sigma, sample_size, seed=42, progress_every=0):
+    """Node-level GNNExplainer top-k Jaccard stability.
+
+    This is the single implementation used by both the app and
+    precompute_stability.py, so cached and live results are comparable.
+    Lipschitz = ||mask_orig - mask_pert|| / ||noise||, with the noise norm taken
+    over the whole feature matrix (noise is applied to every node).
+    """
     import traceback as _tb
     print(f"\n[STABILITY COMPUTE] Starting — sigma={sigma}, sample_size={sample_size}")
     model.eval()
-    x = data.x.to(device)
-    edge_index = data.edge_index.to(device)
+    dev = _model_device(model)
+    x = data.x.to(dev)
+    edge_index = data.edge_index.to(dev)
     true_labels = data.y.cpu().numpy()
 
     preds_raw = predictions_data.get('preds', [])
@@ -176,24 +192,19 @@ def run_stability_analysis(model, data, predictions_data, sigma, sample_size):
         return []
     preds = np.array(preds_raw)
 
-    degrees = np.zeros(data.num_nodes, dtype=int)
-    ei_cpu = edge_index.cpu().numpy()
-    for src in ei_cpu[0]:
-        degrees[src] += 1
+    degrees = np.bincount(edge_index[0].cpu().numpy(), minlength=data.num_nodes)
 
+    # Models return log-probabilities; one clean forward pass serves every node.
     with torch.no_grad():
-        out = model(x, edge_index)
-        if out.min().item() < -20:
-            probs = torch.exp(out).cpu().numpy()
-        else:
-            probs = torch.softmax(out, dim=1).cpu().numpy()
+        probs = torch.exp(model(x, edge_index)).cpu().numpy()
 
-    np.random.seed(42)
+    # Seed both numpy (node sampling) and torch (noise + GNNExplainer mask init)
+    rng = np.random.default_rng(seed)
+    torch.manual_seed(seed)
     if sample_size == 0 or sample_size >= data.num_nodes:
         sample_nodes = np.arange(data.num_nodes)
     else:
-        n_sample = int(sample_size)
-        sample_nodes = np.random.choice(data.num_nodes, size=n_sample, replace=False)
+        sample_nodes = rng.choice(data.num_nodes, size=int(sample_size), replace=False)
     n_sample = len(sample_nodes)
 
     explainer = Explainer(
@@ -211,7 +222,7 @@ def run_stability_analysis(model, data, predictions_data, sigma, sample_size):
         node_idx = int(node_idx)
         try:
             target_cls = int(preds[node_idx])
-            target = torch.tensor([target_cls], device=device)
+            target = torch.tensor([target_cls], device=dev)
             exp_orig = explainer(x=x, edge_index=edge_index, target=target, index=node_idx)
             mask_orig_np = _get_edge_mask(exp_orig)
             if mask_orig_np is None or len(mask_orig_np) == 0:
@@ -231,20 +242,19 @@ def run_stability_analysis(model, data, predictions_data, sigma, sample_size):
             union = len(top10_orig | top10_pert)
             jaccard = intersection / union if union > 0 else 0.0
 
-            confidence = float(torch.softmax(model(x, edge_index), dim=1).cpu().numpy()[node_idx, target_cls])
+            confidence = float(probs[node_idx, target_cls])
             correct = bool(target_cls == int(true_labels[node_idx]))
 
-            noise_node_np = noise[node_idx].cpu().numpy()
-            denom = float(np.linalg.norm(noise_node_np)) + 1e-8
-            if mask_orig_np.shape == mask_pert_np.shape:
+            denom = float(torch.norm(noise).item())
+            if mask_orig_np.shape == mask_pert_np.shape and denom > 1e-9:
                 lipschitz = float(np.linalg.norm(mask_orig_np - mask_pert_np) / denom)
             else:
                 lipschitz = float('nan')
 
             fidelity = None
             try:
-                keep = torch.ones(edge_index.shape[1], dtype=torch.bool, device=device)
-                keep[torch.tensor(list(top10_orig), dtype=torch.long, device=device)] = False
+                keep = torch.ones(edge_index.shape[1], dtype=torch.bool, device=dev)
+                keep[torch.tensor(list(top10_orig), dtype=torch.long, device=dev)] = False
                 ei_rem = edge_index[:, keep]
                 with torch.no_grad():
                     lp_rem = model(x, ei_rem)
@@ -263,6 +273,9 @@ def run_stability_analysis(model, data, predictions_data, sigma, sample_size):
                 'correct': correct
             })
 
+            if progress_every and ((i + 1) % progress_every == 0 or i + 1 == n_sample):
+                print(f"  [{i + 1}/{n_sample}] done — {len(results)} results so far", flush=True)
+
         except Exception:
             _tb.print_exc()
             continue
@@ -278,8 +291,9 @@ def run_prediction_consistency_stability(model, data, predictions_data, sigma,
     import math as _math
 
     model.eval()
-    x = data.x.to(device)
-    edge_index = data.edge_index.to(device)
+    dev = _model_device(model)
+    x = data.x.to(dev)
+    edge_index = data.edge_index.to(dev)
     true_labels = data.y.cpu().numpy()
 
     preds_raw = predictions_data.get('preds', [])
@@ -288,24 +302,20 @@ def run_prediction_consistency_stability(model, data, predictions_data, sigma,
     orig_preds = np.array(preds_raw)
     num_nodes = data.num_nodes
 
-    degrees = np.zeros(num_nodes, dtype=int)
-    ei_cpu = edge_index.cpu().numpy()
-    for src in ei_cpu[0]:
-        degrees[src] += 1
+    degrees = np.bincount(edge_index[0].cpu().numpy(), minlength=num_nodes)
 
+    # Models return log-probabilities
     with torch.no_grad():
-        out_clean = model(x, edge_index)
-        if out_clean.min().item() < -10:
-            probs_clean = torch.exp(out_clean).cpu().numpy()
-        else:
-            probs_clean = torch.softmax(out_clean, dim=1).cpu().numpy()
+        probs_clean = torch.exp(model(x, edge_index)).cpu().numpy()
 
-    n_sample = min(int(sample_size), num_nodes)
-    np.random.seed(42)
-    if n_sample >= num_nodes:
+    # 0 (or None) means all nodes, consistent with run_stability_analysis
+    n_sample = int(sample_size or 0)
+    rng = np.random.default_rng(42)
+    torch.manual_seed(42)
+    if n_sample <= 0 or n_sample >= num_nodes:
         sample_nodes = np.arange(num_nodes)
     else:
-        sample_nodes = np.random.choice(num_nodes, n_sample, replace=False)
+        sample_nodes = rng.choice(num_nodes, n_sample, replace=False)
 
     trial_preds = np.zeros((n_trials, len(sample_nodes)), dtype=int)
     collect_embeddings = hasattr(model, 'conv1')
@@ -370,7 +380,9 @@ def run_prediction_consistency_stability(model, data, predictions_data, sigma,
 # Link wrapper and per-edge stability (moved from app.py)
 class _LinkPredWrapper(torch.nn.Module):
     """Wraps the base GNN so GNNExplainer can explain a single link (src→dst).
-    forward(x, edge_index) → sigmoid score [1,1] for binary_classification task."""
+    forward(x, edge_index) → raw logit [1,1] for a binary_classification task
+    with return_type='raw'. (Returning a sigmoid here would make PyG treat every
+    edge as class 1 and apply sigmoid twice in the loss.)"""
     def __init__(self, base_model, src: int, dst: int):
         super().__init__()
         self.base_model = base_model
@@ -380,11 +392,14 @@ class _LinkPredWrapper(torch.nn.Module):
     def forward(self, x, edge_index, **kwargs):
         _, emb = self.base_model(x, edge_index, return_embeddings=True)
         ep = torch.tensor([[self.src], [self.dst]], device=x.device, dtype=torch.long)
-        score = self.base_model.predict_links(emb, ep)
-        return score.sigmoid().view(1, 1)
+        if getattr(self.base_model, 'enable_link_prediction', False):
+            score = self.base_model.predict_links(emb, ep)
+        else:
+            score = (emb[self.src] * emb[self.dst]).sum()
+        return score.view(1, 1)
 
 
-def run_link_stability_analysis(model, data, sigma: float, sample_size: int):
+def run_link_stability_analysis(model, data, sigma: float, sample_size: int, seed=42, progress_every=25):
     """
     Per-edge stability routine. Returns list of dicts with keys:
         source, target, confidence, stability, degree_sum, common_neighbors, correct
@@ -393,16 +408,18 @@ def run_link_stability_analysis(model, data, sigma: float, sample_size: int):
 
     print(f"\n[LINK STABILITY] Starting — sigma={sigma}, sample_size={sample_size}")
     model.eval()
-    device_local = next(model.parameters()).device if any(p.numel() for p in model.parameters()) else torch.device('cpu')
+    device_local = _model_device(model)
     x = data.x.to(device_local)
     edge_index = data.edge_index.to(device_local)
     num_nodes = data.num_nodes
     ei_cpu = edge_index.cpu().numpy()
 
+    # Seed edge sampling, noise and GNNExplainer mask init
+    rng = np.random.default_rng(seed)
+    torch.manual_seed(seed)
+
     # Out-degree per node
-    degrees = np.zeros(num_nodes, dtype=int)
-    for s in ei_cpu[0]:
-        degrees[int(s)] += 1
+    degrees = np.bincount(ei_cpu[0], minlength=num_nodes)
 
     # Neighbour sets for common-neighbour count
     adj = [set() for _ in range(num_nodes)]
@@ -426,7 +443,7 @@ def run_link_stability_analysis(model, data, sigma: float, sample_size: int):
         sampled = candidate_edges
         print(f"[LINK STABILITY] Running on ALL {len(sampled)} edges")
     else:
-        idx = np.random.choice(len(candidate_edges), size=int(sample_size), replace=False)
+        idx = rng.choice(len(candidate_edges), size=int(sample_size), replace=False)
         sampled = [candidate_edges[i] for i in idx]
         print(f"[LINK STABILITY] Sampled {len(sampled)} edges")
 
@@ -435,7 +452,10 @@ def run_link_stability_analysis(model, data, sigma: float, sample_size: int):
         _, emb_clean = model(x, edge_index, return_embeddings=True)
         srcs = torch.tensor([u for u, v in sampled], device=device_local, dtype=torch.long)
         dsts = torch.tensor([v for u, v in sampled], device=device_local, dtype=torch.long)
-        scores_batch = model.predict_links(emb_clean, torch.stack([srcs, dsts]))
+        if getattr(model, 'enable_link_prediction', False):
+            scores_batch = model.predict_links(emb_clean, torch.stack([srcs, dsts]))
+        else:
+            scores_batch = (emb_clean[srcs] * emb_clean[dsts]).sum(dim=1)
         confs = torch.sigmoid(scores_batch).cpu().numpy().ravel()
 
     results = []
@@ -487,8 +507,8 @@ def run_link_stability_analysis(model, data, sigma: float, sample_size: int):
                 'correct': bool(correct),
             })
             n_ok += 1
-            if (i + 1) % 25 == 0:
-                print(f"[LINK STABILITY]   {i+1}/{len(sampled)} edges done")
+            if progress_every and (i + 1) % progress_every == 0:
+                print(f"[LINK STABILITY]   {i+1}/{len(sampled)} edges done", flush=True)
 
         except Exception as e:
             n_fail += 1

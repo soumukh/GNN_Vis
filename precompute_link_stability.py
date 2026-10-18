@@ -48,7 +48,7 @@ CACHE_DIR  = os.path.join(SCRIPT_DIR, 'stability_cache')
 os.makedirs(CACHE_DIR, exist_ok=True)
 
 
-# ── Model definitions — must mirror updated1_app.py exactly ──────────────────
+# ── Model definitions — must mirror app.py exactly ──────────────────
 
 class GCNNet(torch.nn.Module):
     def __init__(self, in_channels, hidden_channels, out_channels,
@@ -118,7 +118,7 @@ class GATNet(torch.nn.Module):
 
 class _LinkDotWrapper(torch.nn.Module):
     """Wraps the base GNN for GNNExplainer.
-    Returns sigmoid score [1,1] for edge (src→dst) using dot product or
+    Returns the raw logit [1,1] for edge (src→dst) using dot product or
     the model's link_predictor head if available."""
 
     def __init__(self, base_model, src: int, dst: int):
@@ -134,13 +134,15 @@ class _LinkDotWrapper(torch.nn.Module):
             score = self.base_model.predict_links(emb, ep)
         else:
             score = (emb[self.src] * emb[self.dst]).sum()
-        return score.sigmoid().view(1, 1)
+        return score.view(1, 1)  # raw logit: explainer uses return_type='raw'
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def load_lp_package(model_type: str, dataset_name: str) -> dict | None:
-    path = os.path.join(LP_DIR, f"{model_type}_{dataset_name}_link_pred.pkl")
+    # Must be the same package the app loads: the cache key
+    # (dataset/model/sigma) does not record which weights produced the file.
+    path = os.path.join(MODEL_DIR, f"{model_type}_{dataset_name}_tuned.pkl")
     if not os.path.exists(path):
         print(f"  [SKIP] Package not found: {path}")
         return None
@@ -190,112 +192,12 @@ def _safe(v):
 # ── Core computation ──────────────────────────────────────────────────────────
 
 def run_link_stability(model, data: Data, sigma: float) -> pd.DataFrame:
-    """Full-graph link stability: returns a DataFrame with one row per edge."""
-    x          = data.x
-    edge_index = data.edge_index
-    num_nodes  = data.num_nodes
-    ei_cpu     = edge_index.cpu().numpy()
-
-    # Out-degree per node
-    degrees = np.zeros(num_nodes, dtype=np.int32)
-    for s in ei_cpu[0]:
-        degrees[int(s)] += 1
-
-    # Neighbour sets for common-neighbour count (O(E) build)
-    adj: list[set] = [set() for _ in range(num_nodes)]
-    for col in range(ei_cpu.shape[1]):
-        u, v = int(ei_cpu[0, col]), int(ei_cpu[1, col])
-        adj[u].add(v)
-        adj[v].add(u)
-
-    # Deduplicate directed → undirected edges
-    seen:  set   = set()
-    edges: list  = []
-    for col in range(ei_cpu.shape[1]):
-        u, v = int(ei_cpu[0, col]), int(ei_cpu[1, col])
-        key  = (min(u, v), max(u, v))
-        if key not in seen:
-            seen.add(key)
-            edges.append((u, v))
-    print(f"  Unique undirected edges: {len(edges)}", flush=True)
-
-    # Batch confidence — single forward pass for all edges
-    with torch.no_grad():
-        _, emb_clean = model(x, edge_index, return_embeddings=True)
-        srcs = torch.tensor([u for u, _ in edges], dtype=torch.long)
-        dsts = torch.tensor([v for _, v in edges], dtype=torch.long)
-        if getattr(model, 'enable_link_prediction', False):
-            scores = model.predict_links(emb_clean, torch.stack([srcs, dsts]))
-        else:
-            scores = (emb_clean[srcs] * emb_clean[dsts]).sum(dim=1)
-        confs = torch.sigmoid(scores).cpu().numpy().ravel()
-
-    rows:         list = []
-    n_ok = n_fail = 0
-    skip_reasons: dict = {}
-
-    for i, (u, v) in enumerate(edges):
-        try:
-            conf    = _safe(float(confs[i]))
-            deg_sum = int(degrees[u]) + int(degrees[v])
-            cn      = len(adj[u] & adj[v])
-            correct = bool((conf or 0.0) > 0.5)
-
-            wrapper = _LinkDotWrapper(model, u, v)
-            wrapper.eval()
-            expl = Explainer(
-                model=wrapper,
-                algorithm=GNNExplainer(epochs=20),
-                explanation_type='model',
-                edge_mask_type='object',
-                model_config=dict(
-                    mode='binary_classification',
-                    task_level='graph',
-                    return_type='raw',
-                ),
-            )
-
-            exp_orig  = expl(x=x, edge_index=edge_index)
-            mask_orig = get_edge_mask(exp_orig)
-
-            noise     = torch.randn_like(x) * sigma
-            exp_pert  = expl(x=(x + noise), edge_index=edge_index)
-            mask_pert = get_edge_mask(exp_pert)
-
-            if mask_orig is None or mask_pert is None:
-                raise ValueError("edge mask extraction failed")
-
-            k       = min(10, len(mask_orig))
-            top_o   = set(np.argsort(mask_orig)[-k:].tolist())
-            top_p   = set(np.argsort(mask_pert)[-k:].tolist())
-            union   = top_o | top_p
-            jaccard = _safe(len(top_o & top_p) / len(union) if union else 1.0)
-
-            rows.append({
-                'source':           u,
-                'target':           v,
-                'confidence':       conf,
-                'stability':        jaccard,
-                'degree_sum':       deg_sum,
-                'common_neighbors': cn,
-                'correct':          correct,
-            })
-            n_ok += 1
-
-            if (i + 1) % 50 == 0:
-                pct = 100 * (i + 1) / len(edges)
-                print(f"  [{i+1}/{len(edges)}] {pct:.1f}% — ok={n_ok} fail={n_fail}",
-                      flush=True)
-
-        except Exception as e:
-            n_fail += 1
-            reason = f"{type(e).__name__}: {str(e)[:80]}"
-            skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
-
-    print(f"  Finished: {n_ok} ok / {n_fail} failed")
-    if skip_reasons:
-        print(f"  Failure breakdown: {skip_reasons}")
-    return pd.DataFrame(rows)
+    """Full-graph link stability: one row per undirected edge.
+    Delegates to app_stability.run_link_stability_analysis so precomputed and
+    live results share one implementation (seeding, explainer config)."""
+    from app_stability import run_link_stability_analysis
+    rows = run_link_stability_analysis(model, data, sigma, sample_size=0, progress_every=50)
+    return pd.DataFrame([{k: _safe(v) for k, v in r.items()} for r in rows])
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -304,7 +206,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Precompute link-stability cache (parquet)")
     parser.add_argument('--datasets', nargs='+', default=['Cora', 'CiteSeer'],
-                        help='Dataset names matching models/link_prediction/ filenames')
+                        help='Dataset names matching models/*_tuned.pkl filenames')
     parser.add_argument('--models',   nargs='+', default=['GCN', 'GAT'])
     parser.add_argument('--sigmas',   nargs='+', type=float, default=[0.01, 0.05, 0.1])
     parser.add_argument('--force',    action='store_true',

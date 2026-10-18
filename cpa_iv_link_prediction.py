@@ -95,11 +95,14 @@ def get_instruments(u, v, G_nx):
     
     return [cn, aa, deg_u, deg_v, clust_sum]
 
-def estimate_beta_iv(model, data, G_nx, subset_nodes, degree_dict):
+def estimate_beta_iv(model, data, G_nx, subset_nodes, degree_dict, local_to_global, seed=0):
     """
     Estimate Causal Effect Beta using 2SLS on sampled pairs from the subgraph.
     Stage 1: T ~ Z
     Stage 2: Y ~ T_hat
+
+    `subset_nodes`, `G_nx` and `degree_dict` use subgraph-local indices; the model
+    is scored on the full graph, so pairs are mapped back via `local_to_global`.
     """
     # 1. Sample pairs from subgraph to build regression dataset
     samples = []
@@ -107,23 +110,25 @@ def estimate_beta_iv(model, data, G_nx, subset_nodes, degree_dict):
     if len(nodes) < 5: 
         return 0.0 # Not enough data
     
-    # Randomly sample up to 50 pairs
+    # Randomly sample up to 50 pairs (seeded so beta is reproducible)
     import random
+    rnd = random.Random(seed)
     num_samples = min(50, len(nodes) * (len(nodes)-1) // 2)
     pairs = []
     for _ in range(num_samples * 2): # Oversample then filter
-        u, v = random.sample(nodes, 2)
+        u, v = rnd.sample(nodes, 2)
         if u != v:
             pairs.append((u, v))
-    pairs = list(set(pairs))[:num_samples]
+    pairs = sorted(set(pairs))[:num_samples]
     
     Z_list = []
     T_list = []
     Y_list = []
     
     for u, v in pairs:
-        # Y: Model Prediction
-        y_val = get_model_score(model, data.x, data.edge_index, u, v)
+        # Y: Model Prediction (model works on global node ids)
+        y_val = get_model_score(model, data.x, data.edge_index,
+                                local_to_global[u], local_to_global[v])
         
         # T: Total Path Strength (Sum of all simple paths <= 3 hops)
         # This is expensive, so we limit to 2-hop for estimation speed
@@ -199,7 +204,8 @@ def run_cpa_iv_link(model, data, source_node, target_node, top_k=10, max_path_le
 
     # --- 2. IV Estimation (Beta) ---
     # Estimate beta on the subgraph context
-    beta = estimate_beta_iv(model, data, G_sub, list(range(len(subset))), degree_dict)
+    beta = estimate_beta_iv(model, data, G_sub, list(range(len(subset))), degree_dict,
+                            local_to_global=mapping, seed=hash((int(source_node), int(target_node))) & 0xFFFFFFFF)
 
     # --- 3. Baseline Prediction ---
     baseline_score = get_model_score(model, data.x, data.edge_index, source_node, target_node)
@@ -251,10 +257,10 @@ def run_cpa_iv_link(model, data, source_node, target_node, top_k=10, max_path_le
         })
 
     # --- 5. Additional Metrics (Neighborhood/Features) ---
-    # Calculate simple neighborhood/feature impacts for context
-    neigh_impact = {'u': 0, 'v': 0}
-    feat_impact = {'u': 0, 'v': 0}
-    # (Simplified for brevity, similar to previous implementation)
+    # Not computed yet. Report None (not zeros) so the UI shows "no data"
+    # instead of presenting placeholder values as a measured impact.
+    neigh_impact = None
+    feat_impact = None
     
     # --- 6. Formatting ---
     sorted_paths = sorted(path_effects, key=lambda x: x['score'], reverse=True)

@@ -52,16 +52,17 @@ def create_edge_splits(data, val_ratio=0.05, test_ratio=0.15, random_state=42):
     # Convert back to undirected for training (add reverse edges)
     train_edge_index = to_undirected(train_edges)
     
-    # Generate negative edges for validation and testing
+    # Generate negative edges for validation and testing. Sample against the
+    # FULL edge set, so held-out positive edges are never drawn as negatives.
     val_neg_edges = negative_sampling(
-        edge_index=train_edge_index,
+        edge_index=edge_index,
         num_nodes=data.num_nodes,
         num_neg_samples=val_edges.size(1),
         method='sparse'
     )
     
     test_neg_edges = negative_sampling(
-        edge_index=train_edge_index,
+        edge_index=torch.cat([edge_index, val_neg_edges, val_neg_edges.flip(0)], dim=1),
         num_nodes=data.num_nodes,
         num_neg_samples=test_edges.size(1),
         method='sparse'
@@ -193,7 +194,12 @@ def get_top_k_predictions(embeddings, edge_candidates, model, k=10):
         raise ValueError("Model does not support link prediction")
     
     with torch.no_grad():
-        scores = model.predict_links(embeddings, edge_candidates)
+        # Score in chunks: all-pairs candidate sets can hold millions of edges
+        chunk = 200_000
+        scores = torch.cat([
+            model.predict_links(embeddings, edge_candidates[:, i:i + chunk]).reshape(-1)
+            for i in range(0, edge_candidates.size(1), chunk)
+        ]) if edge_candidates.size(1) > 0 else torch.empty(0, device=embeddings.device)
         scores = torch.sigmoid(scores)  # Convert to probabilities
     
     # Sort by score and get top-k
@@ -239,23 +245,13 @@ def create_link_prediction_candidates(data, target_node=None, exclude_existing=T
         candidates = torch.combinations(nodes, 2).t()
     
     if exclude_existing:
-        # Remove existing edges
-        existing_edges = set()
-        for i in range(data.edge_index.size(1)):
-            u, v = data.edge_index[0, i].item(), data.edge_index[1, i].item()
-            existing_edges.add((min(u, v), max(u, v)))
-        
-        # Filter candidates
-        valid_candidates = []
-        for i in range(candidates.size(1)):
-            u, v = candidates[0, i].item(), candidates[1, i].item()
-            edge = (min(u, v), max(u, v))
-            if edge not in existing_edges:
-                valid_candidates.append([u, v])
-        
-        if valid_candidates:
-            candidates = torch.tensor(valid_candidates).t()
-        else:
+        # Remove existing edges (undirected), vectorised via integer edge keys
+        n = int(data.num_nodes)
+        ei = data.edge_index.cpu()
+        existing = torch.unique(torch.minimum(ei[0], ei[1]) * n + torch.maximum(ei[0], ei[1]))
+        cand_keys = torch.minimum(candidates[0], candidates[1]) * n + torch.maximum(candidates[0], candidates[1])
+        candidates = candidates[:, ~torch.isin(cand_keys, existing)]
+        if candidates.size(1) == 0:
             candidates = torch.empty(2, 0, dtype=torch.long)
-    
+
     return candidates

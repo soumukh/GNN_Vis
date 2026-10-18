@@ -1,0 +1,129 @@
+/* Custom Loading Styles */
+
+/* Dim content when loading */
+*[data-dash-is-loading="true"] {
+    opacity: 0.5;
+    pointer-events: none;
+    cursor: wait !important;
+    transition: opacity 0.3s ease-in-out;
+}
+
+/* Button Loading State Styles (applied via callback usually, but helper classes here) */
+.button-loading {
+    cursor: wait !important;
+    opacity: 0.7;
+}
+
+/* Global Loading Cursor */
+body.dash-loading {
+    cursor: wait;
+}
+
+/* Fix for horizontal overflow */
+body {
+    overflow-x: hidden;
+    width: 100%;
+    margin: 0;
+    padding: 0;
+}
+
+/* Ensure containers don't overflow */
+.container-fluid {
+    padding-right: 15px;
+    padding-left: 15px;
+    margin-right: auto;
+    margin-left: auto;
+    max-width: 100%;
+    overflow-x: hidden;
+}
+
+/* Confusion matrix detail pager button styling */
+.cm-page-button {
+    cursor: pointer;
+    transition: background-color 0.15s ease, transform 0.15s ease, border-color 0.15s ease;
+}
+
+.cm-page-button:hover {
+    background-color: #e9ecef;
+    border-color: #888;
+    transform: translateY(-1px);
+}
+
+.cm-page-button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    background-color: #f5f5f5;
+    border-color: #ddd;
+    transform: none;
+}
+
+/* Force pointer cursor on Plotly graph areas where clicks are meaningful */
+#embeddings-view,
+#confusion-matrix-plot,
+#embeddings-view * ,
+#confusion-matrix-plot * {
+    cursor: pointer !important;
+}
+
+/* When Dash is loading, force wait cursor on graphs (override pointer) */
+*[data-dash-is-loading="true"] #embeddings-view,
+*[data-dash-is-loading="true"] #confusion-matrix-plot,
+*[data-dash-is-loading="true"] #embeddings-view *,
+*[data-dash-is-loading="true"] #confusion-matrix-plot * {
+    cursor: wait !important;
+}
+
+/* Compact performance metrics styling for Layer 0 (one-line, minimal footprint) */
+#performance-metrics{
+    height: 28px;
+    line-height: 1;
+    margin: 0 8px;
+    background-color: #f7f9fc; /* subtle pale background */
+    border: 1px solid #e6eef8;
+    padding: 2px 6px;
+    border-radius: 6px;
+}
+#performance-metrics > * { /* metric container */
+    margin: 0;
+    padding: 0 6px;
+    background: transparent !important;
+    border: none !important;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+#performance-metrics h4, #performance-metrics h3, #performance-metrics h2 {
+    margin: 0;
+    font-size: 12px !important;
+    line-height: 1 !important;
+    font-weight: 700 !important;
+}
+#performance-metrics p {
+    margin: 0 0 0 6px;
+    font-size: 10px !important;
+    color: #666 !important;
+    text-transform: none !important;
+}
+
+/* Hide legacy/bottom CPA output panel to avoid duplicate displays
+   CPA is now shown inside the Explainer row (cpa-iv-panel-gnn). */
+#causal-summary-view,
+#cpa-iv-output {
+    display: none !important;
+}
+
+/* Hide stability sample-size controls (node and link) as UI removed */
+#stability-sample-size,
+#link-stability-sample-size {
+    display: none !important;
+}
+
+/* Use a single stability panel: hide the dedicated link stability controls/section */
+#link-stability-section,
+#link-stability-status,
+#link-stability-metric-selector,
+#link-stability-plot-type,
+#link-stability-results-store,
+#link-stability-stats-panel {
+    display: none !important;
+}

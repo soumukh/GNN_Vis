@@ -1,14 +1,13 @@
+# Tested with: torch 2.13, torch-geometric 2.6.1, dash 2.14.2 (Python 3.11)
 dash
 dash-cytoscape
-Flask
 torch
 torch-geometric
 networkx
 numpy
-requests
 pandas
+pyarrow
 plotly
 scikit-learn
-pynvml
-cugraph
-dash-extensions 
+scipy
+umap-learn

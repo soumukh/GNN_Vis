@@ -31,7 +31,7 @@ os.makedirs(CACHE_DIR, exist_ok=True)
 
 device = torch.device('cpu')
 
-# ── Model definitions (must mirror updated1_app.py exactly) ──────────────────
+# ── Model definitions (must mirror app.py exactly) ──────────────────
 
 class GCNNet(torch.nn.Module):
     def __init__(self, in_channels, hidden_channels, out_channels,
@@ -113,110 +113,14 @@ def cache_path(key):
     return os.path.join(CACHE_DIR, filename)
 
 
-# ── Core stability computation (mirrors run_stability_analysis in the app) ────
+# ── Core stability computation (shared with the app) ─────────────────────────
 
 def run_stability(model, data, predictions, sigma):
-    import numpy as np
-
-    x          = data.x
-    edge_index = data.edge_index
-    y          = data.y
-    preds      = predictions.get('preds', [])
-    num_nodes  = data.num_nodes
-
-    explainer = Explainer(
-        model=model,
-        algorithm=GNNExplainer(epochs=20),
-        explanation_type='model',
-        edge_mask_type='object',
-        model_config=dict(
-            mode='multiclass_classification',
-            task_level='node',
-            return_type='log_probs'
-        )
-    )
-
-    results   = []
-    skip_reasons = {}
-
-    for node_idx in range(num_nodes):
-        try:
-            # ── Original explanation ──────────────────────────────────────────
-            exp_orig = explainer(x, edge_index, index=node_idx)
-            mask_orig = get_edge_mask(exp_orig)
-            if mask_orig is None:
-                skip_reasons[node_idx] = 'no edge mask (orig)'
-                continue
-
-            # ── Noisy explanation ─────────────────────────────────────────────
-            noise   = torch.randn_like(x) * sigma
-            x_pert  = x + noise
-            exp_pert = explainer(x_pert, edge_index, index=node_idx)
-            mask_pert = get_edge_mask(exp_pert)
-            if mask_pert is None:
-                skip_reasons[node_idx] = 'no edge mask (pert)'
-                continue
-
-            # ── Top-k Jaccard ─────────────────────────────────────────────────
-            top_k = min(10, len(mask_orig))
-            top_orig = set(np.argsort(mask_orig)[-top_k:].tolist())
-            top_pert = set(np.argsort(mask_pert)[-top_k:].tolist())
-            inter = len(top_orig & top_pert)
-            union = len(top_orig | top_pert)
-            jaccard = inter / union if union > 0 else 0.0
-
-            # ── Confidence ────────────────────────────────────────────────────
-            with torch.no_grad():
-                logits = model(x, edge_index)
-            probs      = torch.exp(logits[node_idx])
-            pred_class = int(probs.argmax().item())
-            confidence = float(probs[pred_class].item())
-            true_label = int(y[node_idx].item())
-            correct    = (pred_class == true_label)
-
-            # ── Degree ────────────────────────────────────────────────────────
-            degree = int((edge_index[0] == node_idx).sum().item())
-
-            # ── Lipschitz ─────────────────────────────────────────────────────
-            diff_mask = float(np.linalg.norm(mask_orig - mask_pert))
-            diff_x    = float(torch.norm(noise).item())
-            lipschitz = diff_mask / diff_x if diff_x > 1e-9 else 0.0
-
-            # ── Fidelity ──────────────────────────────────────────────────────
-            fidelity = 0.0
-            try:
-                top_edges_mask = torch.zeros(edge_index.shape[1], dtype=torch.bool)
-                for ei in top_orig:
-                    top_edges_mask[ei] = True
-                ei_pruned = edge_index[:, ~top_edges_mask]
-                with torch.no_grad():
-                    logits_pruned = model(x, ei_pruned)
-                conf_pruned = float(torch.exp(logits_pruned[node_idx])[pred_class].item())
-                fidelity    = confidence - conf_pruned
-            except Exception:
-                pass
-
-            results.append({
-                'node_idx':  node_idx,
-                'stability': jaccard,
-                'confidence': confidence,
-                'degree':    degree,
-                'lipschitz': lipschitz,
-                'fidelity':  fidelity,
-                'correct':   correct,
-            })
-
-            if (node_idx + 1) % 100 == 0 or node_idx == num_nodes - 1:
-                print(f"  [{node_idx+1}/{num_nodes}] done — {len(results)} results so far", flush=True)
-
-        except Exception as e:
-            skip_reasons[node_idx] = str(e)
-
-    if skip_reasons:
-        print(f"  Skipped {len(skip_reasons)} nodes. First 5: "
-              f"{ {k: skip_reasons[k] for k in list(skip_reasons)[:5]} }")
-
-    return results
+    """Delegate to app_stability.run_stability_analysis so cached results use
+    exactly the same definitions (seeding, Lipschitz, fidelity) as live runs."""
+    from app_stability import run_stability_analysis
+    return run_stability_analysis(model, data, predictions, sigma, sample_size=0,
+                                  progress_every=100)
 
 
 # ── Sanitise ──────────────────────────────────────────────────────────────────
@@ -277,7 +181,10 @@ def main():
             print(f"  [SKIP] Failed to build model: {e}\n")
             continue
 
-        preds = package.get('predictions', [])
+        # Live predictions on the full graph (the saved package predictions can
+        # come from the training graph), matching what the app now uses.
+        with torch.no_grad():
+            preds = model(data.x, data.edge_index).argmax(dim=1).tolist()
         predictions_data = {'preds': preds}
 
         data_obj = Data(x=data.x, edge_index=data.edge_index,
