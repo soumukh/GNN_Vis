@@ -8225,4 +8225,10 @@ if __name__ == '__main__':
     # allows code execution. Set GNN_VIS_HOST=0.0.0.0 / GNN_VIS_DEBUG=0 to change.
     _host = os.environ.get('GNN_VIS_HOST', '127.0.0.1')
     _debug = os.environ.get('GNN_VIS_DEBUG', '1') == '1'
-    app.run(debug=_debug, host=_host, port=8050, use_reloader=False)
+    # dev_tools_hot_reload=False: with the code reloader off, hot reload only
+    # made pages left open across a server restart reconnect and replay their
+    # callbacks against the new server. Their browser-side (clientside)
+    # functions are the old ones, so new clientside callbacks failed with
+    # "Cannot read properties of undefined (reading 'apply')". Refresh instead.
+    app.run(debug=_debug, host=_host, port=8050, use_reloader=False,
+            dev_tools_hot_reload=False)
