@@ -2609,7 +2609,7 @@ app.layout = html.Div(style={
 
                 # ── Panel 1: Node Embeddings ──
                 html.Div(style={
-                    'flex': '1',
+                    'flex': '1.25',   # a little wider than the other two panels
                     'minWidth': '300px',
                     'minHeight': '0',
                     'height': '100%',
@@ -2674,8 +2674,8 @@ app.layout = html.Div(style={
 
                 # ── Panel 3: Confusion Matrix Details ──
                 html.Div(id='gnn-mid-layer-content', style={
-                    'flex': '1',
-                    'minWidth': '300px',
+                    'flex': '0.8',      # narrower: details list needs less room
+                    'minWidth': '260px',
                     'minHeight': '0',
                     'height': '100%',
                     'maxHeight': '100%',
@@ -4833,7 +4833,7 @@ def update_causal_layer3_status(status_data):
 def update_mid_layer(n_clicks, predictions_data, cpa_data, link_cpa_data, embedding_color_mode, selected_node, package, dataset, active_layer3_tab, analysis_mode, selected_link, link_prediction_store):
     try:
         empty_fig = empty_figure("Loading model…")
-        gnn_style = {'flex': '1', 'minWidth': '300px', 'minHeight': '0', 'height': '100%', 'maxHeight': '100%',
+        gnn_style = {'flex': '0.8', 'minWidth': '260px', 'minHeight': '0', 'height': '100%', 'maxHeight': '100%',
                      'margin': '0', 'overflow': 'hidden', 'boxSizing': 'border-box',
                      'display': 'flex', 'flexDirection': 'column'}
 
@@ -4919,7 +4919,10 @@ def update_mid_layer(n_clicks, predictions_data, cpa_data, link_cpa_data, embedd
         print(f"Error in update_mid_layer: {e}")
         import traceback
         traceback.print_exc()
-        return go.Figure(), go.Figure(), {'marginBottom': '10px', 'display': 'block'}
+        return (empty_figure("Could not draw embeddings"), empty_figure("Could not draw confusion matrix"),
+                {'flex': '0.8', 'minWidth': '260px', 'minHeight': '0', 'height': '100%', 'maxHeight': '100%',
+                 'margin': '0', 'overflow': 'hidden', 'boxSizing': 'border-box',
+                 'display': 'flex', 'flexDirection': 'column'})
 
 
 # Auto-run CPA-IV callback removed; CPA is handled by the main CPA trigger and GNN panel.
@@ -6163,9 +6166,10 @@ def update_edge_list_from_cm(clickData, eval_data, analysis_mode, predictions_da
             columns = [
                 {'name': '#',               'id': '#',               'type': 'numeric'},
                 {'name': 'Node ID',          'id': 'Node ID',         'type': 'numeric'},
-                {'name': 'True Class',       'id': 'True Class',      'type': 'numeric'},
-                {'name': 'Predicted Class',  'id': 'Predicted Class', 'type': 'numeric'},
-                {'name': 'Confidence',       'id': 'Confidence',      'type': 'numeric'},
+                # Short headers: this panel is narrow
+                {'name': 'True',             'id': 'True Class',      'type': 'numeric'},
+                {'name': 'Pred.',            'id': 'Predicted Class', 'type': 'numeric'},
+                {'name': 'Conf. %',          'id': 'Confidence',      'type': 'numeric'},
             ]
             footer_text = f'Showing {count} node{"s" if count != 1 else ""}'
             page_children, page_data = _render_cm_detail_page(rows, columns, badge_color, footer_text, 0)
