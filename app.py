@@ -3634,6 +3634,21 @@ def reset_cell_details(analysis_mode, _dataset, _model):
 
 
 @callback(
+    Output('stability-results-store', 'data', allow_duplicate=True),
+    Output('stability-status', 'children', allow_duplicate=True),
+    Input('dataset-dropdown', 'value'),
+    Input('model-dropdown', 'value'),
+    prevent_initial_call=True,
+)
+def reset_stability_on_model_change(_dataset, model_type):
+    """Stability results belong to one dataset/model: clear them on a switch so
+    another model's plots are never shown under the new selection."""
+    if model_type == 'GAT':
+        return [], "⚠️ Stability analysis is only available for GCN models. Switch the model to GCN to run it."
+    return [], " "
+
+
+@callback(
     Output('status-bar', 'children'),
     Input('dataset-dropdown', 'value'),
     Input('model-dropdown', 'value'),
@@ -6775,6 +6790,11 @@ def run_stability_callback(n_clicks, sigma, sample_size,
     Independent of any selected node.
     """
     print(f"\n[STABILITY] run_stability_callback fired: n_clicks={n_clicks}")
+
+    # Stability analysis is supported for GCN only; clear any earlier (GCN)
+    # results so they are not shown under a GAT label.
+    if n_clicks and model_type == 'GAT':
+        return [], "⚠️ Stability analysis is only available for GCN models. Switch the model to GCN to run it."
 
     if not n_clicks or not package or not dataset or not predictions_data:
         print("[STABILITY] Guard failed — missing data")
