@@ -1827,7 +1827,7 @@ def create_cpa_iv_panel(cpa_data, node_idx):
             ], style={'marginBottom': '10px'}),
             html.Div([
                 html.Div(style={'display': 'flex', 'justifyContent': 'space-between', 'marginBottom': '5px'}, children=[
-                    html.Span("CAUSAL STRENGwheTH", style={'fontSize': '11px', 'fontWeight': 'bold', 'color': '#666'}),
+                    html.Span("CAUSAL STRENGTH",style={'fontSize': '11px', 'fontWeight': 'bold', 'color': '#666'}),
                     html.Span(strength_label, style={'fontSize': '11px', 'fontWeight': 'bold', 'color': strength_color})
                 ]),
                 html.Div(style={'height': '8px', 'backgroundColor': '#eee', 'borderRadius': '4px', 'overflow': 'hidden'}, children=[
@@ -2894,7 +2894,11 @@ app.layout = html.Div(style={
                                     ]),
                                 ]),
 
-                                html.Div(style={
+                                html.Div(className='cpa-frame', style={
+                                    # Same width as the Local Subgraph column. Flex reserves each
+                                    # column's padding+border (22px x 3) before the 2:1:1 split, so
+                                    # that column is 22 + (W - 28 gaps - 66) / 2 = (W - 50) / 2.
+                                    'width': 'calc((100% - 50px) / 2)',
                                     'backgroundColor': '#f8f9ff',
                                     'border': '1px solid #dde',
                                     'borderRadius': '6px',
@@ -5067,7 +5071,10 @@ def update_bottom_layer(selected_link, selected_node, explanation, cpa_data, lin
         num_classes = dataset['num_classes']
         dataset_name = dataset.get('name')
         class_to_color_map = class_color_map(num_classes)
-        color_key = subgraph_color_key(subgraph_color_mode, dataset_name, num_classes)
+        # Class colours are already keyed in the node-embeddings view; only the
+        # two-colour correctness key is shown here
+        color_key = (subgraph_color_key(subgraph_color_mode, dataset_name, num_classes)
+                     if subgraph_color_mode == 'correctness' else None)
         true_labels = dataset.get('y') if isinstance(dataset, dict) else None
         yvals = true_labels
 
