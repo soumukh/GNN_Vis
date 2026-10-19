@@ -1583,7 +1583,7 @@ def plot_neighbor_importance(node_importance, node_idx, preds=None, y_labels=Non
 
     return fig
 
-def plot_feature_importance(feature_importance, node_idx, top_k=20, title=None):
+def plot_feature_importance(feature_importance, node_idx, top_k=20, title=None, value_label='Importance'):
     """Plot per-feature importance for a node.
 
     `feature_importance` can be a dict {feat_idx:score} or a list/array.
@@ -1607,14 +1607,18 @@ def plot_feature_importance(feature_importance, node_idx, top_k=20, title=None):
         df,
         x='Feature',
         y='Importance',
-        title=title or f'Top Feature Importance for Node {node_idx}',
-        text_auto='.3f',
-        color='Importance',
-        color_continuous_scale='Viridis'
+        title=title or f'Feature importance, node {node_idx}',
+        hover_data={'Importance': ':.4f'},
     )
+    # Single colour: a colour bar would only repeat the bar heights and takes
+    # ~40% of this narrow panel; per-bar text labels were unreadably small.
+    fig.update_traces(marker_color='#2563eb')
 
-    fig.update_layout(xaxis_type='category', paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', showlegend=False)
-    fig.update_traces(textposition='auto')
+    fig.update_layout(xaxis_type='category', paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', showlegend=False,
+                      # Narrow panel: small, left-aligned title (may wrap onto a second line)
+                      title=dict(font=dict(size=13), x=0.02, xanchor='left', y=0.97, yanchor='top'),
+                      yaxis_title=value_label, xaxis_title='Feature index',
+                      margin=dict(l=48, r=10, t=56, b=44))
 
     return fig
 
@@ -2778,8 +2782,8 @@ app.layout = html.Div(style={
                                 }, children=[
                                     # Left: Local Subgraph (50%)
                                     html.Div(style={
-                                        'flex': '0 0 50%',
-                                        'maxWidth': '50%',
+                                        'flex': '2 1 0',          # 2 : 1 : 1 of the space left after gaps
+                                        
                                         'minWidth': '0',
                                         'backgroundColor': '#f8f9ff',
                                         'border': '1px solid #dde',
@@ -2833,8 +2837,8 @@ app.layout = html.Div(style={
 
                                     # Middle: Neighbor Importance (25%)
                                     html.Div(style={
-                                        'flex': '0 0 25%',
-                                        'maxWidth': '25%',
+                                        'flex': '1 1 0',
+                                        
                                         'minWidth': '200px',
                                         'backgroundColor': '#f8f9ff',
                                         'border': '1px solid #dde',
@@ -2865,8 +2869,8 @@ app.layout = html.Div(style={
 
                                     # Right: Feature Importance (25%)
                                     html.Div(style={
-                                        'flex': '0 0 25%',
-                                        'maxWidth': '25%',
+                                        'flex': '1 1 0',
+                                        
                                         'minWidth': '200px',
                                         'backgroundColor': '#f8f9ff',
                                         'border': '1px solid #dde',
@@ -5444,8 +5448,9 @@ def update_bottom_layer(selected_link, selected_node, explanation, cpa_data, lin
                             feat_dict = {int(i): float(arr[int(i)]) for i in idxs}
                             # Not an explanation yet: label honestly as raw input values
                             feature_fig = plot_feature_importance(
-                                feat_dict, target_node_idx, top_k=10,
-                                title=f'Raw feature values, node {target_node_idx} (run analysis for importance)')
+                                feat_dict, target_node_idx, top_k=10, value_label='Raw value',
+                                title=(f'Raw feature values, node {target_node_idx}'
+                                       '<br><span style="font-size:11px;color:#6b7280">Press RUN ANALYSIS for importance</span>'))
                         else:
                             feature_fig = empty_fig
                     else:
