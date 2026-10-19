@@ -278,3 +278,35 @@ body {
         position: static !important;
     }
 }
+
+/* Global activity indicator (driven by assets/activity.js) ------------ */
+.activity-bar {
+    position: fixed; top: 0; left: 0; right: 0; height: 3px; z-index: 10000;
+    background: linear-gradient(90deg, transparent 0%, var(--accent) 50%, transparent 100%);
+    background-size: 40% 100%; background-repeat: no-repeat;
+    animation: activity-slide 1.1s ease-in-out infinite;
+    opacity: 0; transition: opacity 0.2s ease; pointer-events: none;
+}
+.activity-badge {
+    position: fixed; top: 10px; left: 50%; transform: translate(-50%, -8px); z-index: 10000;
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 6px 14px; border-radius: 999px;
+    background: var(--text); color: #fff; font-size: 12px; font-weight: 600;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
+    opacity: 0; transition: opacity 0.2s ease, transform 0.2s ease; pointer-events: none;
+}
+.activity-time { font-weight: 400; color: #cbd5e1; font-variant-numeric: tabular-nums; }
+.activity-spinner {
+    width: 12px; height: 12px; border-radius: 50%;
+    border: 2px solid rgba(255, 255, 255, 0.35); border-top-color: #fff;
+    animation: activity-spin 0.8s linear infinite;
+}
+body.is-busy .activity-bar { opacity: 1; }
+body.is-busy .activity-badge { opacity: 1; transform: translate(-50%, 0); }
+#run-stability-button.is-busy { opacity: 0.6; cursor: wait !important; }
+@keyframes activity-slide { 0% { background-position: -40% 0; } 100% { background-position: 140% 0; } }
+@keyframes activity-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+    .activity-bar, .activity-spinner { animation: none; }
+    .activity-bar { background: var(--accent); }
+}

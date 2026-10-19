@@ -6421,6 +6421,21 @@ app.clientside_callback(
 
 )
 
+# Immediate feedback for stability runs: the server reply replaces this text.
+# Cached (sigma, model, dataset) combinations return at once; anything else
+# runs GNNExplainer twice per node and can take minutes.
+app.clientside_callback(
+    """
+    function(n_clicks) {
+        if (!n_clicks) { return window.dash_clientside.no_update; }
+        return "⏳ Running… instant if precomputed; otherwise GNNExplainer runs on every node and this can take several minutes.";
+    }
+    """,
+    Output('stability-status', 'children', allow_duplicate=True),
+    Input('run-stability-button', 'n_clicks'),
+    prevent_initial_call=True,
+)
+
 # --- Run Application ---
 
 
