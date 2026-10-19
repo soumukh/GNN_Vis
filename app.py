@@ -166,12 +166,6 @@ CLASS_NAMES = {
     'CiteSeer': ['AI', 'ML', 'IR', 'DB', 'Agents', 'HCI'],
 }
 
-# Short forms for cramped axes (confusion-matrix ticks)
-CLASS_SHORT_NAMES = {
-    'Cora': ['Theory', 'Reinf. Learning', 'Genetic Alg.', 'Neural Nets', 'Prob. Methods', 'Case Based', 'Rule Learning'],
-    'CiteSeer': CLASS_NAMES['CiteSeer'],
-}
-
 CLASS_PALETTE = px.colors.qualitative.Plotly
 
 # Colour-blind-safe pair for correct / incorrect (instead of green / red)
@@ -189,6 +183,11 @@ def class_name(dataset_name, idx):
     if names and 0 <= idx < len(names):
         return names[idx]
     return f'Class {idx}'
+
+
+def class_label(dataset_name, idx):
+    """Class index plus name, e.g. '3: Neural Networks'."""
+    return f"{idx}: {class_name(dataset_name, idx)}"
 
 
 def class_color_map(num_classes):
@@ -1260,11 +1259,11 @@ def plot_embeddings(embeddings_2d, predictions, true_labels, selected_node_id, c
 
     df['Node ID'] = [str(i) for i in range(len(df))]
 
-    names = [class_name(dataset_name, c) for c in range(num_classes)]
+    names = [class_label(dataset_name, c) for c in range(num_classes)]
     preds_arr, true_arr = np.asarray(predictions), np.asarray(true_labels)
 
-    df['Predicted Class'] = [class_name(dataset_name, p) for p in preds_arr]
-    df['True Label'] = [class_name(dataset_name, t) for t in true_arr]
+    df['Predicted Class'] = [class_label(dataset_name, int(p)) for p in preds_arr]
+    df['True Label'] = [class_label(dataset_name, int(t)) for t in true_arr]
     df['Prediction'] = np.where(preds_arr == true_arr, 'Correct', 'Incorrect')
     has_conf = confidences is not None and len(confidences) == len(df)
     if has_conf:
@@ -1287,7 +1286,7 @@ def plot_embeddings(embeddings_2d, predictions, true_labels, selected_node_id, c
     elif color_mode == 'confidence':
         # Low confidence = dark: uncertain regions stand out against confident clusters
         fig = px.scatter(df, color='Confidence', color_continuous_scale='Viridis', range_color=[0, 1], **common)
-        fig.update_layout(coloraxis_colorbar=dict(title='Conf.', thickness=10, len=0.6, x=1.0))
+        fig.update_layout(coloraxis_colorbar=dict(title='Conf.', thickness=10, len=0.55, x=1.01, y=0.25, yanchor='middle'))
     else:
         fig = px.scatter(df, color='True Label', color_discrete_map=class_colors,
                          category_orders={'True Label': names}, **common)
@@ -1384,21 +1383,29 @@ def plot_embeddings(embeddings_2d, predictions, true_labels, selected_node_id, c
 
         plot_bgcolor='rgba(0,0,0,0)',
 
+        # Compact vertical key on the right: a horizontal key below the plot
+        # wraps into several rows and overlaps the points on short panels
         legend=dict(
 
-            orientation="h",
+            orientation="v",
+
+            font=dict(size=10),
+
+            tracegroupgap=0,
 
             yanchor="top",
 
-            y=-0.02,
+            y=1,
 
-            xanchor="center",
+            xanchor="left",
 
-            x=0.5
+            x=1.01,
+
+            bgcolor='rgba(255,255,255,0)',
 
         ),
 
-        margin=dict(t=36, b=40, l=10, r=10)
+        margin=dict(t=30, b=6, l=6, r=6)
 
     )
 
@@ -2631,16 +2638,13 @@ app.layout = html.Div(style={
                     'boxShadow': '0 1px 4px rgba(0,0,0,0.07)',
                     'boxSizing': 'border-box',
                 }, children=[
-                    dcc.Loading(
-                        id='confusion-matrix-loading',
-                        type='circle',
-                        children=[
-                            dcc.Graph(
-                                id='confusion-matrix-plot',
-                                style={'height': '100%', 'width': '100%', 'cursor': 'pointer', 'margin': '0', 'padding': '0'},
-                                config={'displayModeBar': False},
-                            )
-                        ],
+                    # No dcc.Loading wrapper: its inner div has no height, so the
+                    # graph fell back to Plotly's 450px default and was clipped
+                    # in the shorter panel (the matrix computes instantly anyway).
+                    dcc.Graph(
+                        id='confusion-matrix-plot',
+                        style={'height': '100%', 'width': '100%', 'cursor': 'pointer', 'margin': '0', 'padding': '0'},
+                        config={'displayModeBar': False, 'responsive': True},
                     ),
                 ]),
 
@@ -4855,7 +4859,7 @@ def update_mid_layer(n_clicks, predictions_data, cpa_data, link_cpa_data, embedd
         cm = confusion_matrix(true_labels, preds, labels=list(range(num_classes)))
         # Numeric x/y keep clickData parseable by update_edge_list_from_cm;
         # class names are shown as tick labels only.
-        names = [class_name(dataset_name, i) for i in range(num_classes)]
+        names = [class_label(dataset_name, i) for i in range(num_classes)]
         hover = [[f"Actual: {names[a]}<br>Predicted: {names[p]}<br>{cm[a][p]} nodes<br><i>click to list them</i>"
                   for p in range(num_classes)] for a in range(num_classes)]
         cm_fig = go.Figure(data=go.Heatmap(
@@ -4863,12 +4867,18 @@ def update_mid_layer(n_clicks, predictions_data, cpa_data, link_cpa_data, embedd
             colorscale='Blues', text=cm, texttemplate="%{text}", hoverongaps=False,
             hovertext=hover, hovertemplate="%{hovertext}<extra></extra>", showscale=False,
         ))
-        short = CLASS_SHORT_NAMES.get(dataset_name) or names
+        # Index-only ticks keep the matrix compact; hover shows the class names
+        idx_ticks = [str(i) for i in range(num_classes)]
         cm_fig.update_layout(
             title=dict(text="Confusion matrix (click a cell)", x=0.5, font=dict(size=13)),
-            xaxis=dict(title="Predicted", tickmode='array', tickvals=list(range(num_classes)), ticktext=short, tickangle=-30),
-            yaxis=dict(title="Actual", tickmode='array', tickvals=list(range(num_classes)), ticktext=short, autorange='reversed'),
-            margin=dict(l=10, r=10, t=36, b=10),
+            xaxis=dict(title=dict(text="Predicted class", standoff=4), tickmode='array',
+                       tickvals=list(range(num_classes)), ticktext=idx_ticks, side='bottom',
+                       constrain='domain'),
+            yaxis=dict(title=dict(text="Actual class", standoff=4), tickmode='array',
+                       tickvals=list(range(num_classes)), ticktext=idx_ticks, autorange='reversed',
+                       scaleanchor='x', scaleratio=1, constrain='domain'),
+            autosize=True,
+            margin=dict(l=44, r=8, t=30, b=40),
             paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
             clickmode='event+select',
             dragmode=False
@@ -6075,7 +6085,7 @@ def update_edge_list_from_cm(clickData, eval_data, analysis_mode, predictions_da
 
             is_diagonal = (pred_class == actual_class)
             ds_name = dataset.get('name') if isinstance(dataset, dict) else None
-            pred_name, actual_name = class_name(ds_name, pred_class), class_name(ds_name, actual_class)
+            pred_name, actual_name = class_label(ds_name, pred_class), class_label(ds_name, actual_class)
             if is_diagonal:
                 badge_color = CORRECT_COLOR
                 label       = f'Correctly classified as {pred_name}'
