@@ -1245,7 +1245,14 @@ def get_2d_embeddings(package):
     return None
 
 
-def plot_embeddings(embeddings_2d, predictions, true_labels, selected_node_id, class_to_color_map, num_classes, target_node_id=None, dataset_name=None):
+EMBEDDING_COLOR_TITLES = {
+    'actual': 'true class', 'predicted': 'predicted class',
+    'correctness': 'correct / incorrect', 'confidence': 'model confidence',
+}
+
+
+def plot_embeddings(embeddings_2d, predictions, true_labels, selected_node_id, class_to_color_map, num_classes,
+                    target_node_id=None, dataset_name=None, color_mode='actual', confidences=None):
 
     if embeddings_2d is None: return empty_figure("Embeddings not available")
 
@@ -1254,24 +1261,41 @@ def plot_embeddings(embeddings_2d, predictions, true_labels, selected_node_id, c
     df['Node ID'] = [str(i) for i in range(len(df))]
 
     names = [class_name(dataset_name, c) for c in range(num_classes)]
+    preds_arr, true_arr = np.asarray(predictions), np.asarray(true_labels)
 
-    df['Predicted Class'] = [class_name(dataset_name, p) for p in predictions]
+    df['Predicted Class'] = [class_name(dataset_name, p) for p in preds_arr]
+    df['True Label'] = [class_name(dataset_name, t) for t in true_arr]
+    df['Prediction'] = np.where(preds_arr == true_arr, 'Correct', 'Incorrect')
+    has_conf = confidences is not None and len(confidences) == len(df)
+    if has_conf:
+        df['Confidence'] = np.round(np.asarray(confidences, dtype=float), 3)
+    elif color_mode == 'confidence':
+        color_mode = 'actual'   # no confidences available: fall back
 
-    # Color points by TRUE label (class names; order fixed so colours are stable)
-    df['True Label'] = [class_name(dataset_name, t) for t in np.array(true_labels)]
+    hover = ['Node ID', 'True Label', 'Predicted Class'] + (['Confidence'] if has_conf else [])
+    class_colors = {names[k]: v for k, v in class_to_color_map.items() if k < len(names)}
+    common = dict(x='Dim 1', y='Dim 2', hover_data=hover, custom_data=['Node ID'], template='plotly_white')
 
-    category_orders = {"True Label": names}
-
-    fig = px.scatter(df, x='Dim 1', y='Dim 2', color='True Label',
-                     hover_data=['Node ID', 'Predicted Class'], custom_data=['Node ID'],
-                     color_discrete_map={names[k]: v for k, v in class_to_color_map.items() if k < len(names)},
-                     category_orders=category_orders,
-                     template='plotly_white')
+    # Order fixed so a class keeps its colour whatever the mode
+    if color_mode == 'predicted':
+        fig = px.scatter(df, color='Predicted Class', color_discrete_map=class_colors,
+                         category_orders={'Predicted Class': names}, **common)
+    elif color_mode == 'correctness':
+        fig = px.scatter(df, color='Prediction',
+                         color_discrete_map={'Correct': CORRECT_COLOR, 'Incorrect': INCORRECT_COLOR},
+                         category_orders={'Prediction': ['Correct', 'Incorrect']}, **common)
+    elif color_mode == 'confidence':
+        # Low confidence = dark: uncertain regions stand out against confident clusters
+        fig = px.scatter(df, color='Confidence', color_continuous_scale='Viridis', range_color=[0, 1], **common)
+        fig.update_layout(coloraxis_colorbar=dict(title='Conf.', thickness=10, len=0.6, x=1.0))
+    else:
+        fig = px.scatter(df, color='True Label', color_discrete_map=class_colors,
+                         category_orders={'True Label': names}, **common)
     fig.update_traces(marker=dict(symbol='circle', size=6, opacity=0.8, line=dict(width=0)))
 
-    # Ring misclassified nodes so errors stand out without a second colour scheme
-    wrong = np.where(np.asarray(predictions) != np.asarray(true_labels))[0]
-    if len(wrong):
+    # Ring misclassified nodes (redundant in correctness mode, where colour already says it)
+    wrong = np.where(preds_arr != true_arr)[0]
+    if len(wrong) and color_mode != 'correctness':
         fig.add_trace(go.Scatter(
             x=df['Dim 1'].values[wrong], y=df['Dim 2'].values[wrong], mode='markers',
             marker=dict(symbol='circle-open', size=9, color=INCORRECT_COLOR, line=dict(width=1.2)),
@@ -1334,7 +1358,7 @@ def plot_embeddings(embeddings_2d, predictions, true_labels, selected_node_id, c
 
         title={
 
-            'text': "Node embeddings (colour = true class)",
+            'text': f"Node embeddings (colour = {EMBEDDING_COLOR_TITLES.get(color_mode, 'true class')})",
 
             'font': {'size': 13},
 
@@ -2567,11 +2591,27 @@ app.layout = html.Div(style={
                     'margin': '0',
                     'boxShadow': '0 1px 4px rgba(0,0,0,0.07)',
                     'boxSizing': 'border-box',
+                    'display': 'flex',
+                    'flexDirection': 'column',
                 }, children=[
-                          # heading removed for compact layout
+                    html.Div(className='subgraph-toolbar', style={'marginBottom': '2px'}, children=[
+                        html.Span("Colour by", className='control-label'),
+                        dcc.RadioItems(
+                            id='embedding-color-mode',
+                            options=[
+                                {'label': 'Actual', 'value': 'actual'},
+                                {'label': 'Predicted', 'value': 'predicted'},
+                                {'label': 'Correctness', 'value': 'correctness'},
+                                {'label': 'Confidence', 'value': 'confidence'},
+                            ],
+                            value='actual',
+                            inline=True,
+                            className='segmented',
+                        ),
+                    ]),
                     dcc.Graph(
                         id='embeddings-view',
-                        style={'height': '100%', 'width': '100%', 'cursor': 'pointer', 'margin': '0', 'padding': '0'},
+                        style={'flex': '1', 'minHeight': '0', 'width': '100%', 'cursor': 'pointer', 'margin': '0', 'padding': '0'},
                         config={'displayModeBar': False},
                     ),
                 ]),
@@ -4752,16 +4792,17 @@ def update_causal_layer3_status(status_data):
     Input('current-predictions-store', 'data'),
     Input('cpa-iv-store', 'data'),
     Input('link-cpa-iv-store', 'data'),
+    Input('embedding-color-mode', 'value'),
+    Input('selected-node-store', 'data'),
     State('precomputed-package-store', 'data'),
     State('full-dataset-store', 'data'),
-    State('selected-node-store', 'data'),
     State('layer3-tabs', 'value'),
     State('analysis-mode-store', 'data'),
     State('selected-link-store', 'data'),
     State('link-prediction-store', 'data'),
     prevent_initial_call=True
 )
-def update_mid_layer(n_clicks, predictions_data, cpa_data, link_cpa_data, package, dataset, selected_node, active_layer3_tab, analysis_mode, selected_link, link_prediction_store):
+def update_mid_layer(n_clicks, predictions_data, cpa_data, link_cpa_data, embedding_color_mode, selected_node, package, dataset, active_layer3_tab, analysis_mode, selected_link, link_prediction_store):
     try:
         empty_fig = empty_figure("Loading model…")
         gnn_style = {'flex': '1', 'minWidth': '300px', 'minHeight': '0', 'height': '100%', 'maxHeight': '100%',
@@ -4792,7 +4833,10 @@ def update_mid_layer(n_clicks, predictions_data, cpa_data, link_cpa_data, packag
         if embeddings_2d is None:
             embeddings_fig = go.Figure(layout={'title': "Embeddings Not Available"})
         else:
-            embeddings_fig = plot_embeddings(np.array(embeddings_2d), preds, true_labels, selected_node_id_str, class_to_color_map, num_classes, target_node_id=target_node_id_str, dataset_name=dataset_name)
+            embeddings_fig = plot_embeddings(np.array(embeddings_2d), preds, true_labels, selected_node_id_str, class_to_color_map, num_classes,
+                                             target_node_id=target_node_id_str, dataset_name=dataset_name,
+                                             color_mode=embedding_color_mode or 'actual',
+                                             confidences=predictions_data.get('confidences'))
 
         # If there are active link predictions, the subgraph evaluation
         # callback is responsible for rendering the confusion matrix. Avoid
