@@ -278,8 +278,3 @@ body {
         position: static !important;
     }
 }
-
-/* Predicted-link list (link mode) */
-.link-item { text-transform: none !important; letter-spacing: 0 !important; font-weight: 400 !important;
-             height: auto !important; line-height: 1.4 !important; margin: 0 !important; border-radius: 0 !important; }
-.link-item:hover { background: var(--accent-soft) !important; }

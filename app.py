@@ -3657,8 +3657,8 @@ def update_status_bar(dataset_name, model_type, analysis_mode, predictions_data,
             chips.append(html.Span(f"Link {selected_link.get('source')} → {selected_link.get('target')}", className='chip'))
             step = "Inspect the causal paths and subgraph below."
         else:
-            step = ("Enter a source node, press RUN ANALYSIS, then click a predicted link "
-                    "(right panel) or a confusion-matrix cell.")
+            step = ("Press RUN ANALYSIS, click a confusion-matrix cell, then a link in its list "
+                    "to inspect it.")
     else:
         node_id = (selected_node or {}).get('id')
         explained = (isinstance(explanation, dict) and explanation.get('explanation_type') == 'node_classification'
@@ -4694,6 +4694,14 @@ def run_cpa_iv_callback_active(global_clicks, layer3_clicks, selected_link_trigg
                                lp_inputs, lp_input_ids,
                                layer3_source, layer3_target):
     triggered = ctx.triggered_id
+    # A row click in the cell-details table sets BOTH selected-link-store and
+    # selected-node-store; ctx.triggered_id may then name the node store, whose
+    # branch bails out in link mode. Resolve against every input that changed.
+    _changed = {t['prop_id'].split('.')[0] for t in (ctx.triggered or [])}
+    if analysis_mode == 'link_prediction' and 'selected-link-store' in _changed:
+        triggered = 'selected-link-store'
+    elif analysis_mode == 'node_classification' and 'selected-node-store' in _changed:
+        triggered = 'selected-node-store'
 
     if triggered == 'global-run-button':
         if (global_clicks or 0) == 0:
@@ -5541,64 +5549,10 @@ def update_bottom_layer(selected_link, selected_node, explanation, cpa_data, lin
 )
 
 def update_link_list(link_predictions):
-
-    if not link_predictions or not isinstance(link_predictions, list) or len(link_predictions) == 0:
-
-        return html.Div([], style={'minHeight': '0'}), go.Figure(), {'display': 'none'}
-
-    source_node = link_predictions[0].get('source', 'N/A')
-
-    link_output = html.Div([
-
-        html.Div(f"Top predicted links for node {source_node}", className='legend-title', style={'marginTop': '8px'}),
-        html.Div("Click a link to explain it below.", className='empty-hint'),
-
-        html.Div([
-
-            html.Button([
-
-                html.Span(f"{source_node} → {pred['target']}", style={'fontWeight': 'bold', 'color': '#007bff'}),
-
-                html.Span(f" ({pred['score']:.3f})", style={'color': '#666', 'marginLeft': '5px', 'fontSize': '11px'})
-
-            ], 
-
-            id={'type': 'link-prediction-item', 'index': i, 'source': source_node, 'target': pred['target']},
-
-            n_clicks=0,
-
-            className='link-item',
-
-            style=    {
-
-                'display': 'block',
-
-                'width': '100%',
-
-                'textAlign': 'left',
-
-                'padding': '4px 8px',
-
-                'border': 'none',
-
-                'borderBottom': '1px solid #eee',
-
-                'backgroundColor': '#fff',
-
-                'cursor': 'pointer'
-
-            })
-
-            for i, pred in enumerate(link_predictions[:20])
-
-        ], style={'maxHeight': '200px', 'overflowY': 'auto', 'border': '1px solid #ddd', 'marginTop': '5px'})
-
-    ])
-
-    # Render the clickable list (it was built but never returned, so predicted
-    # links for the source node were invisible). The bar chart stays hidden.
-    link_fig = go.Figure()
-    return link_output, link_fig, {'display': 'none', 'height': '0px'}
+    """The 'top predicted links for the source node' list is not shown: links
+    are opened from the confusion-matrix cell list instead (click a cell, then
+    a row). Without a source node the list defaulted to node 0, which was noise."""
+    return html.Div([], style={'minHeight': '0'}), go.Figure(), {'display': 'none', 'height': '0px'}
 
 # Subgraph evaluation callback
 
