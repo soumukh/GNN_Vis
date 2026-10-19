@@ -842,6 +842,17 @@ def explanation_cards(cpa_content, attention_content):
     return html.Div(cards, style={'display': 'flex', 'gap': '14px', 'alignItems': 'flex-start', 'flexWrap': 'wrap'})
 
 
+def cell_details_placeholder(analysis_mode='node_classification'):
+    """Cell-details panel before any confusion-matrix cell is clicked."""
+    what = ("its edges (TP / FP / FN / TN); click a row to inspect that link"
+            if analysis_mode == 'link_prediction'
+            else "the nodes in it; click a row to select that node")
+    return html.Div([
+        html.Div("Cell details", className='legend-title'),
+        html.Div(f"Click a cell of the confusion matrix to list {what}.", className='empty-hint'),
+    ], className='legend-card', style={'padding': '8px'})
+
+
 def subgraph_color_key(color_mode, dataset_name, num_classes):
     """Small swatch legend matching the node colours in the Cytoscape subgraph."""
     if color_mode == 'correctness':
@@ -2737,11 +2748,7 @@ app.layout = html.Div(style={
                            html.Div(id='edge-predictions-display',
                                  style={'flex': '1', 'display': 'flex', 'flexDirection': 'column', 'overflow': 'auto',
                                      'margin': '0', 'padding': '0', 'minHeight': '0'},
-                                 children=[html.Div([
-                                     html.Div("Cell details", className='legend-title'),
-                                     html.Div("Click a cell of the confusion matrix to list the nodes in it; "
-                                              "click a row to select that node.", className='empty-hint'),
-                                 ], className='legend-card', style={'padding': '8px'})]),
+                                 children=[cell_details_placeholder()]),
                         html.Div(id='link-prediction-results-container',
                                  style={'margin': '0', 'padding': '0', 'flex': '0 0 auto',
                                         'maxHeight': 'none', 'overflow': 'hidden', 'boxSizing': 'border-box'}, children=[
@@ -3612,6 +3619,19 @@ def update_full_graph_view(active_tab, color_mode, filter_metric, filter_range, 
             'paper_bgcolor': 'rgba(0,0,0,0)',
             'plot_bgcolor': '#f9fbff',
         })
+
+@callback(
+    Output('edge-predictions-display', 'children', allow_duplicate=True),
+    Output('cm-detail-paging-store', 'data', allow_duplicate=True),
+    Input('analysis-mode-store', 'data'),
+    Input('dataset-dropdown', 'value'),
+    Input('model-dropdown', 'value'),
+    prevent_initial_call=True,
+)
+def reset_cell_details(analysis_mode, _dataset, _model):
+    """A clicked cell belongs to one matrix; clear it when the matrix changes."""
+    return cell_details_placeholder(analysis_mode), None
+
 
 @callback(
     Output('status-bar', 'children'),
@@ -5641,7 +5661,7 @@ def evaluate_subgraph_predictions(link_pred_data, analysis_mode, package, datase
                     print(f"WARNING: Missing subgraph model for {model_type}. Falling back to GCN split: {fallback_model_path}")
                     subgraph_model_path = fallback_model_path
                 else:
-                    return f"❌ Subgraph model not found: {subgraph_model_path}", go.Figure(), [], no_update, {'display': 'none'}, no_update, no_update
+                    return f"❌ Subgraph model not found: {subgraph_model_path}", go.Figure(), [cell_details_placeholder('link_prediction')], no_update, {'display': 'none'}, no_update, no_update
 
             with open(subgraph_model_path, 'rb') as f:
                 subgraph_package = pickle.load(f)
@@ -5652,7 +5672,7 @@ def evaluate_subgraph_predictions(link_pred_data, analysis_mode, package, datase
 
             if not removed_edges:
 
-                return "❌ No removed edges information found", go.Figure(), [], no_update, {'display': 'none'}, no_update, no_update
+                return "❌ No removed edges information found", go.Figure(), [cell_details_placeholder('link_prediction')], no_update, {'display': 'none'}, no_update, no_update
 
             # Use the actual model to compute link scores so the confusion matrix
             # and CPA/subgraph views remain consistent with the explanation pipeline.
@@ -5888,41 +5908,11 @@ def evaluate_subgraph_predictions(link_pred_data, analysis_mode, package, datase
                 autosize=True,
             )
 
-            # Create edge predictions display
-
-            edge_predictions = []
-
-            for i, (edge, pred, true) in enumerate(zip(removed_edges[:10], predicted_labels[:10], true_labels[:10])):  # Show first 10
-
-                color = CORRECT_COLOR if pred == true else INCORRECT_COLOR
-
-                status = "Correct" if pred == true else "Wrong"
-
-                edge_predictions.append(
-
-                    html.Div([
-
-                        html.Span(f"Edge {edge[0]} ↔ {edge[1]}: ", style={'fontWeight': 'bold'}),
-
-                        html.Span(f"Pred: {'Edge' if pred else 'No Edge'} | ", style={'color': '#666'}),
-
-                        html.Span(f"Actual: {'Edge' if true else 'No Edge'} ", style={'color': '#666'}),
-
-                        html.Span(status, style={'color': color, 'fontWeight': 'bold', 'marginLeft': '5px'})
-
-                    ], style={'marginBottom': '5px', 'padding': '5px', 'borderBottom': '1px solid #eee', 'fontSize': '12px'})
-
-                )
-
-            if len(removed_edges) > 10:
-
-                edge_predictions.append(
-
-                    html.Div(f"... and {len(removed_edges) - 10} more edges",
-
-                            style={'fontStyle': 'italic', 'color': '#999', 'marginTop': '10px', 'fontSize': '12px'})
-
-                )
+            # Leave the cell-details panel alone: it is filled only when a matrix
+            # cell is clicked (update_edge_list_from_cm) and cleared by
+            # reset_cell_details. This callback also re-runs when a link is picked,
+            # which would otherwise wipe the list the user just opened.
+            edge_predictions = no_update
 
             # Performance metrics on the held-out (removed) edges
             metrics = metric_tiles([
@@ -5946,7 +5936,7 @@ def evaluate_subgraph_predictions(link_pred_data, analysis_mode, package, datase
 
         print(f"Subgraph evaluation error: {e}")
 
-        return f"❌ Evaluation failed: {str(e)}", go.Figure(), no_update, no_update, no_update, no_update
+        return f"❌ Evaluation failed: {str(e)}", go.Figure(), no_update, no_update, no_update, no_update, no_update
 
 
 def _make_cm_detail_table(rows, columns, badge_color):
