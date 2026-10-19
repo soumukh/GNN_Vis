@@ -73,38 +73,6 @@ body {
     cursor: wait !important;
 }
 
-/* Compact performance metrics styling for Layer 0 (one-line, minimal footprint) */
-#performance-metrics{
-    height: 28px;
-    line-height: 1;
-    margin: 0 8px;
-    background-color: #f7f9fc; /* subtle pale background */
-    border: 1px solid #e6eef8;
-    padding: 2px 6px;
-    border-radius: 6px;
-}
-#performance-metrics > * { /* metric container */
-    margin: 0;
-    padding: 0 6px;
-    background: transparent !important;
-    border: none !important;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-}
-#performance-metrics h4, #performance-metrics h3, #performance-metrics h2 {
-    margin: 0;
-    font-size: 12px !important;
-    line-height: 1 !important;
-    font-weight: 700 !important;
-}
-#performance-metrics p {
-    margin: 0 0 0 6px;
-    font-size: 10px !important;
-    color: #666 !important;
-    text-transform: none !important;
-}
-
 /* Hide legacy/bottom CPA output panel to avoid duplicate displays
    CPA is now shown inside the Explainer row (cpa-iv-panel-gnn). */
 #causal-summary-view,
@@ -127,3 +95,191 @@ body {
 #link-stability-stats-panel {
     display: none !important;
 }
+
+
+/* ════════════════════════════════════════════════════════════════════
+   UI refresh: tokens, header, status bar, cards, legends, empty states
+   ════════════════════════════════════════════════════════════════════ */
+:root {
+    --bg: #f5f7fb;
+    --surface: #ffffff;
+    --border: #e2e7f0;
+    --text: #1f2937;
+    --muted: #6b7280;
+    --accent: #2563eb;
+    --accent-soft: #eaf1ff;
+    --correct: #2166ac;
+    --incorrect: #e66101;
+    --radius: 8px;
+}
+
+body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+/* Header ------------------------------------------------------------- */
+.app-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 12px;
+    padding: 12px 16px;
+    margin-bottom: 14px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+}
+.app-brand { display: flex; flex-direction: column; gap: 2px; }
+.app-title {
+    margin: 0 !important;
+    font-size: 20px !important;
+    font-weight: 700 !important;
+    letter-spacing: -0.2px;
+    line-height: 1.2 !important;
+    color: var(--text);
+}
+.app-subtitle { font-size: 12px; color: var(--muted); }
+
+/* Status bar --------------------------------------------------------- */
+.status-bar {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    font-size: 12px;
+}
+.chip {
+    display: inline-flex;
+    align-items: center;
+    padding: 3px 10px;
+    border-radius: 999px;
+    background: #f1f3f7;
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-weight: 600;
+    white-space: nowrap;
+}
+.chip-context { background: var(--accent-soft); border-color: #cddcff; color: #1d4ed8; }
+.chip-busy { color: var(--muted); font-style: italic; font-weight: 500; }
+.chip-error { background: #fff1e8; border-color: #ffd2b5; color: #a8430a; white-space: normal; }
+.next-step { color: var(--muted); }
+.next-step::before { content: "→ "; color: var(--accent); font-weight: 700; }
+
+/* Controls row (layer 1) as a card ---------------------------------- */
+#layer-1 > div:first-child {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 10px 14px;
+}
+#layer-1 { margin-bottom: 12px !important; padding-bottom: 0 !important; }
+
+/* Metric tiles -------------------------------------------------------- */
+#performance-metrics { gap: 8px; align-items: stretch; }
+.metric-tile {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-width: 70px;
+    padding: 3px 8px;
+    background: #f8fafd;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    cursor: help;
+}
+.metric-value { font-size: 16px; font-weight: 700; line-height: 1.15; font-variant-numeric: tabular-nums; }
+.metric-label { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.4px; }
+
+/* Subgraph toolbar + segmented radio --------------------------------- */
+.subgraph-toolbar {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-bottom: 8px;
+}
+.control-label {
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+}
+.hint { font-size: 11px; color: var(--muted); cursor: help; }
+.segmented { display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.segmented label {
+    display: inline-flex !important;
+    align-items: center;
+    margin: 0 !important;
+    padding: 3px 9px;
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    border-right: 1px solid var(--border);
+    background: var(--surface);
+}
+.segmented label:last-child { border-right: none; }
+.segmented input[type="radio"] { display: none; }
+.segmented label:has(input:checked) { background: var(--accent); color: #fff; }
+
+/* Subgraph legend card ----------------------------------------------- */
+.legend-card { display: flex; flex-direction: column; gap: 4px; min-width: 200px; }
+.legend-row { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.legend-title { font-weight: 700; font-size: 13px; }
+.legend-label { color: var(--muted); min-width: 64px; }
+.pill {
+    display: inline-block;
+    padding: 1px 8px;
+    border-radius: 999px;
+    color: #fff;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+}
+.color-key {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 10px;
+    margin-top: 6px;
+    padding-top: 6px;
+    border-top: 1px solid var(--border);
+    font-size: 11px;
+    color: var(--muted);
+}
+.key-item { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.swatch { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+
+/* Empty states / help --------------------------------------------- */
+.empty-hint { font-size: 12px; color: var(--muted); line-height: 1.45; max-width: 320px; }
+.help-line {
+    font-size: 12px;
+    color: var(--muted);
+    background: #f8fafd;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 10px;
+    margin: 0 0 10px 0;
+    line-height: 1.5;
+}
+.help-line b { color: var(--text); }
+
+/* Narrow screens: stack the explanation panels ---------------------- */
+@media (max-width: 1100px) {
+    .explain-row { flex-wrap: wrap; }
+    #layer-3 [style*="flex: 0 0 50%"],
+    #layer-3 [style*="flex: 0 0 25%"] {
+        flex: 1 1 100% !important;
+        max-width: 100% !important;
+        position: static !important;
+    }
+}
+
+/* Predicted-link list (link mode) */
+.link-item { text-transform: none !important; letter-spacing: 0 !important; font-weight: 400 !important;
+             height: auto !important; line-height: 1.4 !important; margin: 0 !important; border-radius: 0 !important; }
+.link-item:hover { background: var(--accent-soft) !important; }

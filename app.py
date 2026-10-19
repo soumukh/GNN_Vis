@@ -79,6 +79,15 @@ from link_prediction_utils import create_link_prediction_candidates, get_top_k_p
 
 from cpa_iv_link_prediction import run_cpa_iv_link
 
+# Logs contain emoji/arrows: when stdout is redirected on Windows the default
+# cp1252 encoding raises UnicodeEncodeError inside callbacks (e.g. aborting the
+# model load). Force UTF-8 and never fail on a print.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+
 # Fix for threading shutdown errors
 
 sys.stdout.flush()
@@ -147,6 +156,73 @@ AVAILABLE_DATASETS = ['Cora', 'CiteSeer']
 
 AVAILABLE_MODELS = ['GCN', 'GAT']
 
+# --- Shared visual encoding ---
+# Class names in Planetoid label-index order. Verified against per-index node
+# counts (Cora: 351/217/418/818/426/298/180; CiteSeer index 0 = AI's 249 nodes
+# plus the 15 isolated nodes PyG assigns label 0).
+CLASS_NAMES = {
+    'Cora': ['Theory', 'Reinforcement Learning', 'Genetic Algorithms', 'Neural Networks',
+             'Probabilistic Methods', 'Case Based', 'Rule Learning'],
+    'CiteSeer': ['AI', 'ML', 'IR', 'DB', 'Agents', 'HCI'],
+}
+
+# Short forms for cramped axes (confusion-matrix ticks)
+CLASS_SHORT_NAMES = {
+    'Cora': ['Theory', 'Reinf. Learning', 'Genetic Alg.', 'Neural Nets', 'Prob. Methods', 'Case Based', 'Rule Learning'],
+    'CiteSeer': CLASS_NAMES['CiteSeer'],
+}
+
+CLASS_PALETTE = px.colors.qualitative.Plotly
+
+# Colour-blind-safe pair for correct / incorrect (instead of green / red)
+CORRECT_COLOR = '#2166ac'
+INCORRECT_COLOR = '#e66101'
+
+
+def class_name(dataset_name, idx):
+    """Human-readable class name, falling back to 'Class k'."""
+    try:
+        idx = int(idx)
+    except (TypeError, ValueError):
+        return str(idx)
+    names = CLASS_NAMES.get(dataset_name)
+    if names and 0 <= idx < len(names):
+        return names[idx]
+    return f'Class {idx}'
+
+
+def class_color_map(num_classes):
+    """The single class -> colour mapping used by every view."""
+    return {i: CLASS_PALETTE[i % len(CLASS_PALETTE)] for i in range(num_classes)}
+
+
+def metric_tiles(items):
+    """Compact stat tiles: items = [(label, value, tooltip), ...]."""
+    return [
+        html.Div([
+            html.Div(f"{value:.3f}" if isinstance(value, float) else str(value), className='metric-value'),
+            html.Div(label, className='metric-label'),
+        ], className='metric-tile', title=tip)
+        for label, value, tip in items
+    ]
+
+
+def empty_figure(message='', height=None):
+    """Blank figure with a centred hint instead of empty axes."""
+    layout = dict(
+        paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+        xaxis=dict(visible=False), yaxis=dict(visible=False),
+        margin=dict(l=10, r=10, t=10, b=10),
+    )
+    if message:
+        layout['annotations'] = [dict(
+            text=message, xref='paper', yref='paper', x=0.5, y=0.5,
+            showarrow=False, font=dict(size=13, color='#8a94a6'),
+        )]
+    if height:
+        layout['height'] = height
+    return go.Figure(layout=layout)
+
 # --- TASK: Path Management ---
 # Purpose: determine absolute paths for models, data and other artifacts.
 # Inputs: current script location (`__file__`) or CWD when running interactively.
@@ -185,6 +261,21 @@ PACKAGE_CACHE = {}
 DATASET_CACHE = {}
 MODEL_CACHE = {}
 DATA_TENSOR_CACHE = {}
+_FULL_GRAPH_LAYOUT_CACHE = {}  # hash(nodes, edges) -> spring_layout positions
+
+# The cached model is shared by all callbacks. PyG's Explainer temporarily
+# injects edge masks into its conv layers, so callbacks that run concurrently
+# (RUN triggers GNNExplainer and CPA-IV together) corrupt each other's forward
+# passes (AssertionError in message passing). Run model-using callbacks one at a time.
+MODEL_LOCK = threading.RLock()
+
+
+def serialize_model_use(fn):
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        with MODEL_LOCK:
+            return fn(*args, **kwargs)
+    return wrapper
 
 
 def get_package_cache_key(model_type: str, dataset_name: str):
@@ -217,6 +308,7 @@ def load_dataset_into_cache(dataset_name: str):
         'num_features': int(data.num_node_features),
         'num_classes': int(dataset_obj.num_classes),
         'original_edge_index': data.edge_index.cpu(),
+        'test_mask': data.test_mask.cpu(),
     }
     DATASET_CACHE[dataset_name] = full_dataset
     return full_dataset
@@ -710,6 +802,19 @@ def instantiate_model(package, model_type, num_features, num_classes, verbose=Fa
 
 # --- Visualization Helpers ---
 
+def subgraph_color_key(color_mode, dataset_name, num_classes):
+    """Small swatch legend matching the node colours in the Cytoscape subgraph."""
+    if color_mode == 'correctness':
+        items = [('Correct', CORRECT_COLOR), ('Incorrect', INCORRECT_COLOR)]
+    else:
+        cmap = class_color_map(num_classes)
+        items = [(class_name(dataset_name, i), cmap[i]) for i in range(num_classes)]
+    return html.Div(className='color-key', children=[
+        html.Span([html.Span(className='swatch', style={'backgroundColor': c}), name], className='key-item')
+        for name, c in items
+    ])
+
+
 def create_subgraph_cytoscape(data, center_node_idx, predictions, class_to_color_map, explanation, cpa_data, link_predictions=None, analysis_mode='node_classification', selected_path_idx=None, color_mode='predicted', true_labels=None):
 
     # STRICT ENGINEERING PATCH: Ensure Link Subgraph strictly reflects selected link (u, v)
@@ -849,10 +954,17 @@ def create_subgraph_cytoscape(data, center_node_idx, predictions, class_to_color
         return [], set()
 
     explained_edges = set()
+    edge_weight = {}  # undirected edge -> max explainer mask value (drives edge width)
 
     if explanation and explanation.get('edge_mask'):
 
         edge_mask = torch.tensor(explanation['edge_mask'])
+
+        if edge_mask.numel() == data.edge_index.shape[1]:
+            ei_cpu = data.edge_index.cpu()
+            for idx in torch.nonzero(edge_mask > 0).flatten().tolist():
+                key = tuple(sorted((int(ei_cpu[0, idx]), int(ei_cpu[1, idx]))))
+                edge_weight[key] = max(edge_weight.get(key, 0.0), float(edge_mask[idx]))
 
         important_indices = torch.where(edge_mask > 0.1)[0]
 
@@ -991,7 +1103,7 @@ def create_subgraph_cytoscape(data, center_node_idx, predictions, class_to_color
                 try:
                     actual_idx = int(true_labels[node_id])
                     is_correct = int(predictions[node_id]) == actual_idx
-                    node_color = '#2ecc71' if is_correct else '#e74c3c'
+                    node_color = CORRECT_COLOR if is_correct else INCORRECT_COLOR
                 except Exception:
                     pass
             else:
@@ -1010,9 +1122,7 @@ def create_subgraph_cytoscape(data, center_node_idx, predictions, class_to_color
             
         cyto_elements.append({
 
-            'data': {'id': str(node_id), 'label': str(node_id)},
-
-            'style': {'background-color': node_color},
+            'data': {'id': str(node_id), 'label': str(node_id), 'color': node_color},
 
             'classes': ' '.join(classes)
 
@@ -1040,7 +1150,10 @@ def create_subgraph_cytoscape(data, center_node_idx, predictions, class_to_color
 
         if edge_tuple in predicted_edges: classes.append('predicted-edge')
 
-        cyto_elements.append({'data': {'source': str(u), 'target': str(v)}, 'classes': ' '.join(classes)})
+        edge_data = {'source': str(u), 'target': str(v)}
+        if edge_tuple in edge_weight:
+            edge_data['weight'] = round(edge_weight[edge_tuple], 4)
+        cyto_elements.append({'data': edge_data, 'classes': ' '.join(classes)})
 
     # Add predicted edges that don't exist in the graph
 
@@ -1132,27 +1245,39 @@ def get_2d_embeddings(package):
     return None
 
 
-def plot_embeddings(embeddings_2d, predictions, true_labels, selected_node_id, class_to_color_map, num_classes, target_node_id=None):
+def plot_embeddings(embeddings_2d, predictions, true_labels, selected_node_id, class_to_color_map, num_classes, target_node_id=None, dataset_name=None):
 
-    if embeddings_2d is None: return go.Figure(layout={'title': "Embeddings Not Available"})
+    if embeddings_2d is None: return empty_figure("Embeddings not available")
 
     df = pd.DataFrame(embeddings_2d, columns=['Dim 1', 'Dim 2'])
 
     df['Node ID'] = [str(i) for i in range(len(df))]
 
-    df['Predicted Class'] = predictions.astype(str)
+    names = [class_name(dataset_name, c) for c in range(num_classes)]
 
-    # Color points by TRUE label (stringified for stable mapping)
-    df['True Label'] = np.array(true_labels).astype(str)
+    df['Predicted Class'] = [class_name(dataset_name, p) for p in predictions]
 
-    category_orders = {"True Label": [str(i) for i in range(num_classes)]}
+    # Color points by TRUE label (class names; order fixed so colours are stable)
+    df['True Label'] = [class_name(dataset_name, t) for t in np.array(true_labels)]
+
+    category_orders = {"True Label": names}
 
     fig = px.scatter(df, x='Dim 1', y='Dim 2', color='True Label',
                      hover_data=['Node ID', 'Predicted Class'], custom_data=['Node ID'],
-                     color_discrete_map={str(k): v for k, v in class_to_color_map.items()},
+                     color_discrete_map={names[k]: v for k, v in class_to_color_map.items() if k < len(names)},
                      category_orders=category_orders,
                      template='plotly_white')
-    fig.update_traces(marker_symbol='circle')
+    fig.update_traces(marker=dict(symbol='circle', size=6, opacity=0.8, line=dict(width=0)))
+
+    # Ring misclassified nodes so errors stand out without a second colour scheme
+    wrong = np.where(np.asarray(predictions) != np.asarray(true_labels))[0]
+    if len(wrong):
+        fig.add_trace(go.Scatter(
+            x=df['Dim 1'].values[wrong], y=df['Dim 2'].values[wrong], mode='markers',
+            marker=dict(symbol='circle-open', size=9, color=INCORRECT_COLOR, line=dict(width=1.2)),
+            name='Misclassified', hoverinfo='skip',
+            customdata=[[str(i)] for i in wrong],
+        ))
     fig.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
 
     # Highlight Source Node
@@ -1167,9 +1292,10 @@ def plot_embeddings(embeddings_2d, predictions, true_labels, selected_node_id, c
                     y=[source_row['Dim 2']],
                     mode='markers',
                     marker=dict(symbol='star', size=20, color='#f1c40f', line=dict(width=2, color='black')),
-                    name='Source (u)',
+                    name='Selected',
                     hoverinfo='text',
-                    text=f"Source: Node {selected_node_id}"
+                    text=f"Selected: Node {selected_node_id}",
+                    customdata=[[str(idx)]],
                 ))
         except: pass
 
@@ -1186,7 +1312,8 @@ def plot_embeddings(embeddings_2d, predictions, true_labels, selected_node_id, c
                     marker=dict(symbol='diamond', size=18, color='#e74c3c', line=dict(width=2, color='black')),
                     name='Target (v)',
                     hoverinfo='text',
-                    text=f"Target: Node {target_node_id}"
+                    text=f"Target: Node {target_node_id}",
+                    customdata=[[str(idx)]],
                 ))
                 
                 # Draw Line
@@ -1207,9 +1334,11 @@ def plot_embeddings(embeddings_2d, predictions, true_labels, selected_node_id, c
 
         title={
 
-            'text': "Node Embeddings",
+            'text': "Node embeddings (colour = true class)",
 
-            'y':0.9,
+            'font': {'size': 13},
+
+            'y':0.98,
 
             'x':0.5,
 
@@ -1221,6 +1350,10 @@ def plot_embeddings(embeddings_2d, predictions, true_labels, selected_node_id, c
 
         legend_title_text=None,
 
+        xaxis=dict(title=None, showticklabels=False, zeroline=False),
+
+        yaxis=dict(title=None, showticklabels=False, zeroline=False),
+
         clickmode='event+select', 
 
         paper_bgcolor='rgba(0,0,0,0)', 
@@ -1231,9 +1364,9 @@ def plot_embeddings(embeddings_2d, predictions, true_labels, selected_node_id, c
 
             orientation="h",
 
-            yanchor="bottom",
+            yanchor="top",
 
-            y=-0.2,
+            y=-0.02,
 
             xanchor="center",
 
@@ -1241,7 +1374,7 @@ def plot_embeddings(embeddings_2d, predictions, true_labels, selected_node_id, c
 
         ),
 
-        margin=dict(t=50, b=50, l=10, r=10)
+        margin=dict(t=36, b=40, l=10, r=10)
 
     )
 
@@ -1319,15 +1452,13 @@ def get_one_hop_neighbors(pyg_data, node_idx):
         return []
 
 
-def plot_neighbor_importance(node_importance, node_idx, preds=None, y_labels=None, one_hop_neighbors=None):
+def plot_neighbor_importance(node_importance, node_idx, preds=None, y_labels=None, one_hop_neighbors=None, dataset_name=None):
     """Show a table of 1-hop neighbors with their true class, predicted class, and importance."""
     if one_hop_neighbors is None:
         one_hop_neighbors = sorted(node_importance.keys())
 
     if not one_hop_neighbors:
-        return go.Figure(layout={'title': f"No neighbor importance data for Node {node_idx}",
-                                 'paper_bgcolor': 'rgba(0,0,0,0)',
-                                 'plot_bgcolor': 'rgba(0,0,0,0)'})
+        return empty_figure(f"Node {node_idx} has no neighbours")
 
     neighbor_list = []
     for neighbor in one_hop_neighbors:
@@ -1340,7 +1471,7 @@ def plot_neighbor_importance(node_importance, node_idx, preds=None, y_labels=Non
         true_class = 'N/A'
         if y_labels is not None and int(neighbor) < len(y_labels):
             try:
-                true_class = int(y_labels[int(neighbor)])
+                true_class = class_name(dataset_name, int(y_labels[int(neighbor)]))
             except Exception:
                 true_class = 'N/A'
 
@@ -1348,7 +1479,7 @@ def plot_neighbor_importance(node_importance, node_idx, preds=None, y_labels=Non
         predicted_class = 'N/A'
         if preds is not None and int(neighbor) < len(preds):
             try:
-                predicted_class = int(preds[int(neighbor)])
+                predicted_class = class_name(dataset_name, int(preds[int(neighbor)]))
             except Exception:
                 predicted_class = 'N/A'
 
@@ -1398,13 +1529,13 @@ def plot_neighbor_importance(node_importance, node_idx, preds=None, y_labels=Non
 
     return fig
 
-def plot_feature_importance(feature_importance, node_idx, top_k=20):
+def plot_feature_importance(feature_importance, node_idx, top_k=20, title=None):
     """Plot per-feature importance for a node.
 
     `feature_importance` can be a dict {feat_idx:score} or a list/array.
     """
     if not feature_importance:
-        return go.Figure(layout={'title': f"No feature importance for Node {node_idx}", 'paper_bgcolor':'rgba(0,0,0,0)'})
+        return empty_figure(f"No feature importance for Node {node_idx}")
 
     # Normalize into dataframe
     if isinstance(feature_importance, dict):
@@ -1422,7 +1553,7 @@ def plot_feature_importance(feature_importance, node_idx, top_k=20):
         df,
         x='Feature',
         y='Importance',
-        title=f'Top Feature Importance for Node {node_idx}',
+        title=title or f'Top Feature Importance for Node {node_idx}',
         text_auto='.3f',
         color='Importance',
         color_continuous_scale='Viridis'
@@ -2055,13 +2186,13 @@ app.title = "🧠 Interactive GNN Explainer"
 
 STYLESHEET = [
 
-    {'selector': 'node', 'style': {'label': 'data(label)', 'font-size': '14px', 'text-valign': 'center', 'color': 'white', 'text-outline-color': '#2c3e50', 'text-outline-width': 2, 'shape': 'ellipse', 'width': 35, 'height': 35}},
+    {'selector': 'node', 'style': {'background-color': 'data(color)', 'label': 'data(label)', 'font-size': '14px', 'text-valign': 'center', 'color': 'white', 'text-outline-color': '#2c3e50', 'text-outline-width': 2, 'shape': 'ellipse', 'width': 35, 'height': 35}},
 
-    {'selector': '.center-node', 'style': {'shape': 'star', 'background-color': '#f1c40f', 'width': 50, 'height': 50}},
+    {'selector': '.center-node', 'style': {'shape': 'star', 'width': 50, 'height': 50, 'border-width': 3, 'border-color': '#1f2937'}},
 
     {'selector': 'edge', 'style': {'width': 2, 'line-color': '#bdc3c7', 'curve-style': 'bezier'}},
 
-    {'selector': '.explained-edge', 'style': {'line-color': '#2ecc71', 'width': 6, 'opacity': 0.9}},
+    {'selector': '.explained-edge', 'style': {'line-color': '#1a9850', 'width': 'mapData(weight, 0, 1, 2, 10)', 'opacity': 0.9}},
 
     {'selector': '.causal-path-edge', 'style': {'line-color': '#e74c3c', 'width': 5, 'line-style': 'dashed'}},
     
@@ -2073,9 +2204,9 @@ STYLESHEET = [
 
 app.layout = html.Div(style={
 
-    'fontFamily': '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif',
+    'fontFamily': '"Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif',
 
-    'backgroundColor': '#ffffff',
+    'backgroundColor': '#f5f7fb',
 
     'minHeight': '100vh',
 
@@ -2154,6 +2285,16 @@ app.layout = html.Div(style={
 
         html.Button(id='remove-edge-button-lp', n_clicks=0),
 
+    ]),
+
+    # --- HEADER: title + live status / next-step guidance ---
+    html.Div(className='app-header', children=[
+        html.Div(className='app-brand', children=[
+            html.H1("Interactive GNN Explainer", className='app-title'),
+            html.Span("Visual analytics for GCN / GAT predictions, explanations and stability",
+                      className='app-subtitle'),
+        ]),
+        html.Div(id='status-bar', className='status-bar'),
     ]),
 
     # --- LAYER 1: TOP (USER CONTROLS ONLY) ---
@@ -2302,7 +2443,7 @@ app.layout = html.Div(style={
                 ),
                 html.Div(
                     id='selection-interface',
-                    style={'width': '150px'}
+                    style={'minWidth': '150px'}
                 )
             ]
         )
@@ -2495,7 +2636,11 @@ app.layout = html.Div(style={
                            html.Div(id='edge-predictions-display',
                                  style={'flex': '1', 'display': 'flex', 'flexDirection': 'column', 'overflow': 'auto',
                                      'margin': '0', 'padding': '0', 'minHeight': '0'},
-                                 children=[]),
+                                 children=[html.Div([
+                                     html.Div("Cell details", className='legend-title'),
+                                     html.Div("Click a cell of the confusion matrix to list the nodes in it; "
+                                              "click a row to select that node.", className='empty-hint'),
+                                 ], className='legend-card', style={'padding': '8px'})]),
                         html.Div(id='link-prediction-results-container',
                                  style={'margin': '0', 'padding': '0', 'flex': '0 0 auto',
                                         'maxHeight': 'none', 'overflow': 'hidden', 'boxSizing': 'border-box'}, children=[
@@ -2517,7 +2662,7 @@ app.layout = html.Div(style={
     # --- LAYER 3: BOTTOM — THREE EXPLANATION FRAMES ---
 
     html.Div(id='layer-3', style={'display': 'none', 'borderTop': '2px solid #dee2e6', 'paddingTop': '0', 'marginTop': '0', 'minHeight': '0', 'overflow': 'visible'}, children=[
-        dcc.Loading(id='loading-layer-3', type='circle', color='#007bff', children=[
+        html.Div(id='loading-layer-3', children=[
 
             dcc.Tabs(
                 id='layer3-tabs',
@@ -2558,7 +2703,7 @@ app.layout = html.Div(style={
                                 html.Div(style={'height': '0px', 'marginBottom': '0px'}),
 
                                 # ── A1, A2 & A3: Local Subgraph (50%) | Neighbor (25%) | Feature (25%) ──
-                                html.Div(style={
+                                html.Div(className='explain-row', style={
                                     'display': 'flex',
                                     'gap': '14px',
                                     'marginBottom': '14px',
@@ -2579,10 +2724,23 @@ app.layout = html.Div(style={
                                                   style={'fontWeight': 'bold', 'fontSize': '12px',
                                                       'color': '#0056b3', 'margin': '0 0 6px 0',
                                                       'textTransform': 'uppercase', 'letterSpacing': '0.3px'}),
-                                        html.Div(style={'display': 'flex', 'alignItems': 'center', 'gap': '10px', 'marginBottom': '10px'}, children=[
-                                            html.Span("Node Color: actual class", style={'fontWeight': 'bold', 'fontSize': '11px', 'color': '#555', 'marginBottom': '0'})
+                                        html.Div(className='subgraph-toolbar', children=[
+                                            html.Span("Colour by", className='control-label'),
+                                            dcc.RadioItems(
+                                                id='subgraph-color-mode',
+                                                options=[
+                                                    {'label': 'Actual class', 'value': 'actual'},
+                                                    {'label': 'Predicted class', 'value': 'predicted'},
+                                                    {'label': 'Correctness', 'value': 'correctness'},
+                                                ],
+                                                value='actual',
+                                                inline=True,
+                                                className='segmented',
+                                            ),
+                                            html.Span("Edge width = explainer importance", className='hint',
+                                                      title="Green edges were selected by GNNExplainer (mask > 0.1); thicker = more important."),
                                         ]),
-                                        cyto.Cytoscape(
+                                        dcc.Loading(type='dot', color='#2563eb', children=cyto.Cytoscape(
                                             id='graph-view',
                                             stylesheet=STYLESHEET,
                                             layout={'name': 'cose', 'animate': False, 'randomize': False, 'fit': True},
@@ -2593,20 +2751,15 @@ app.layout = html.Div(style={
                                                 'backgroundColor': '#f9f9f9',
                                                 'borderRadius': '4px',
                                             }
-                                        ),
+                                        )),
                                         # Inline legend placed over the bottom-left of the subgraph panel
                                         html.Div(id='subgraph-legend-inline', style={
-                                            'position': 'absolute',
-                                            'left': '12px',
-                                            'bottom': '12px',
-                                            'zIndex': 999,
-                                            'backgroundColor': 'rgba(255,255,255,0.95)',
-                                            'padding': '8px',
+                                            'marginTop': '8px',
+                                            'backgroundColor': '#ffffff',
+                                            'padding': '8px 10px',
                                             'borderRadius': '6px',
-                                            'border': '1px solid #eee',
+                                            'border': '1px solid #e2e7f0',
                                             'fontSize': '12px',
-                                            'boxShadow': '0 1px 4px rgba(0,0,0,0.08)',
-                                            'maxWidth': '85%'
                                         }),
                                     ]),
 
@@ -2630,7 +2783,7 @@ app.layout = html.Div(style={
                                             style={'fontWeight': 'bold', 'fontSize': '12px',
                                                    'color': '#0056b3', 'margin': '0 0 6px 0',
                                                    'textTransform': 'uppercase', 'letterSpacing': '0.3px'}),
-                                        dcc.Graph(
+                                        dcc.Loading(type='dot', color='#2563eb', children=dcc.Graph(
                                             id='neighbor-importance-view',
                                             style={
                                                 'height': '320px',
@@ -2639,7 +2792,7 @@ app.layout = html.Div(style={
                                                 'overflowX': 'auto'
                                             },
                                             config={'displayModeBar': False},
-                                        ),
+                                        )),
                                     ]),
 
                                     # Right: Feature Importance (25%)
@@ -2661,11 +2814,11 @@ app.layout = html.Div(style={
                                                 style={'fontWeight': 'bold', 'fontSize': '12px',
                                                        'color': '#0056b3', 'margin': '0 0 6px 0',
                                                        'textTransform': 'uppercase', 'letterSpacing': '0.3px'}),
-                                        dcc.Graph(
+                                        dcc.Loading(type='dot', color='#2563eb', children=dcc.Graph(
                                             id='feature-importance-view',
                                             style={'height': '300px', 'width': '100%'},
                                             config={'displayModeBar': False},
-                                        ),
+                                        )),
                                     ]),
                                 ]),
 
@@ -2763,7 +2916,7 @@ app.layout = html.Div(style={
                                         )
                                     ]),
                                 ]),
-                                dcc.Graph(
+                                dcc.Loading(type='dot', color='#2563eb', children=dcc.Graph(
                                     id='full-graph-view',
                                     style={'width': '100%', 'height': '760px', 'minHeight': '760px'},
                                     config={
@@ -2781,7 +2934,7 @@ app.layout = html.Div(style={
                                         'paper_bgcolor': 'rgba(0,0,0,0)',
                                         'plot_bgcolor': '#f9fbff',
                                     })
-                                )
+                                ))
                             ]),
                         ],
                     ),
@@ -2830,10 +2983,11 @@ app.layout = html.Div(style={
                                     }, children=[
 
                                         #html.Div([
-                                            html.Label("Noise σ",
+                                            html.Label("Noise σ ⓘ",
+                                                       title="Standard deviation of the Gaussian noise added to every node's features before re-running GNNExplainer.",
                                                        style={'fontWeight': 'bold', 'fontSize': '12px',
                                                               'color': '#555', 'display': 'block',
-                                                              'marginBottom': '4px'}),
+                                                              'marginBottom': '4px', 'cursor': 'help'}),
                                             dcc.RadioItems(
                                                 id='stability-sigma-selector',
                                                 options=[
@@ -2880,7 +3034,11 @@ app.layout = html.Div(style={
                                                     }
                                                 ),
 
-                                                html.Span("Axis Metrics:", style={'fontSize': '13px', 'color': '#555', 'fontWeight': 'bold', 'marginLeft': '10px'}),
+                                                html.Span("Axis Metrics ⓘ:",
+                                                          title="Confidence: predicted-class probability. Degree: number of neighbours. "
+                                                                "Lipschitz: change in the edge mask per unit of input noise (lower = smoother). "
+                                                                "Correct vs Wrong: stability split by whether the prediction is right.",
+                                                          style={'fontSize': '13px', 'color': '#555', 'fontWeight': 'bold', 'marginLeft': '10px', 'cursor': 'help'}),
                                                 dcc.Dropdown(
                                                     id='stability-metric-selector',
                                                     options=[
@@ -2946,6 +3104,13 @@ app.layout = html.Div(style={
                                                  children=" "),
                                     ]),
 
+                                    html.Div(className='help-line', children=[
+                                        html.B("Stability S"), " = Jaccard overlap of the top-10 explanation edges before and after adding noise σ "
+                                        "(1 = identical explanation, 0 = no overlap). ",
+                                        html.B("Fidelity"), " = drop in confidence when those 10 edges are removed. "
+                                        "Click a region of the plot to list the nodes in it.",
+                                    ]),
+
                                     # ── Split-Screen Layout ───────────────────────────────────────
                                     html.Div(style={
                                         'display': 'flex', 'gap': '20px',
@@ -2957,12 +3122,12 @@ app.layout = html.Div(style={
                                            
                                             # Main Plot Container
                                             html.Div(style={'border': '1px solid #dee2e6', 'borderRadius': '4px', 'padding': '8px', 'backgroundColor': '#fafafa'}, children=[
-                                                dcc.Graph(
+                                                dcc.Loading(type='dot', color='#2563eb', children=dcc.Graph(
                                                     id='main-stability-plot', 
                                                     figure=go.Figure(layout={'title': 'Select a metric to view', 'height': 360, 'margin': dict(l=40, r=15, t=40, b=40), 'paper_bgcolor': 'rgba(0,0,0,0)', 'plot_bgcolor': 'rgba(0,0,0,0)'}),
                                                     style={'height': '360px'}, 
                                                     config={'displayModeBar': False}
-                                                )
+                                                ))
                                             ]),
 
                                             # Stats Panel
@@ -3052,13 +3217,13 @@ app.layout = html.Div(style={
     Input('full-graph-color-mode', 'value'),
     Input('full-graph-filter-metric', 'value'),
     Input('full-graph-filter-range', 'value'),
+    Input('selected-node-store', 'data'),
+    Input('current-predictions-store', 'data'),
     State('full-dataset-store', 'data'),
     State('editable-graph-store', 'data'),
-    State('current-predictions-store', 'data'),
     State('stability-results-store', 'data'),
-    State('selected-node-store', 'data'),
 )
-def update_full_graph_view(active_tab, color_mode, filter_metric, filter_range, dataset, graph_data, predictions_data, stability_results, selected_node):
+def update_full_graph_view(active_tab, color_mode, filter_metric, filter_range, selected_node, predictions_data, dataset, graph_data, stability_results):
     """
     Build a full-graph Plotly figure for the embedded frame.
 
@@ -3075,8 +3240,12 @@ def update_full_graph_view(active_tab, color_mode, filter_metric, filter_range, 
         'plot_bgcolor': '#f9fbff',
     })
 
+    # Only build the (expensive) figure while its tab is visible
+    if active_tab != 'tab-full-graph':
+        return no_update
+
     if not dataset or not graph_data or not predictions_data:
-        return empty_fig
+        return empty_figure("Load a model to see the full graph")
 
     try:
         num_nodes   = dataset['num_nodes']
@@ -3153,23 +3322,45 @@ def update_full_graph_view(active_tab, color_mode, filter_metric, filter_range, 
         # ── Sample if too large ──────────────────────────────────────
         sampled = False
         display_nodes = filtered_nodes
+        extra_node = None   # selected node added on top of a fixed sample
+        G_filtered = G
         if len(filtered_nodes) > MAX_MODAL_NODES:
             sampled = True
             rng = np.random.default_rng(42)
+            # Fixed sample (independent of the selection) so its layout can be cached
             display_nodes = rng.choice(filtered_nodes, MAX_MODAL_NODES, replace=False).tolist()
-            # Always include the selected node so it stays visible
             sel_id = None
             if selected_node and selected_node.get('id') is not None:
                 try:
                     sel_id = int(selected_node['id'])
                 except (ValueError, TypeError):
                     pass
-            if sel_id is not None and sel_id not in display_nodes:
-                display_nodes[0] = sel_id          # replace one sampled node
+            if sel_id is not None and sel_id in node_set and sel_id not in display_nodes:
+                extra_node = sel_id
             G = G.subgraph(display_nodes).copy()
 
-        # ── Spring layout ────
-        pos = nx.spring_layout(G, seed=42, k=1.4 / max(1, len(G) ** 0.5))
+        # ── Spring layout (cached: colour/filter/selection changes reuse positions) ────
+        layout_key = (dataset_name, tuple(sorted(G.nodes())), tuple(sorted(G.edges())))
+        layout_key = hash(layout_key)
+        pos = _FULL_GRAPH_LAYOUT_CACHE.get(layout_key)
+        if pos is None:
+            pos = nx.spring_layout(G, seed=42, k=1.4 / max(1, len(G) ** 0.5))
+            if len(_FULL_GRAPH_LAYOUT_CACHE) > 32:
+                _FULL_GRAPH_LAYOUT_CACHE.clear()
+            _FULL_GRAPH_LAYOUT_CACHE[layout_key] = pos
+
+        # Keep the selected node visible: place it at the centroid of its
+        # sampled neighbours (no re-layout, so selection changes stay fast)
+        if extra_node is not None:
+            pos = dict(pos)
+            nbrs = [n for n in G_filtered.neighbors(extra_node) if n in pos]
+            if nbrs:
+                pos[extra_node] = np.mean([pos[n] for n in nbrs], axis=0)
+            else:
+                pos[extra_node] = np.array([0.0, 0.0])
+            G.add_node(extra_node)
+            G.add_edges_from((extra_node, n) for n in nbrs)
+            display_nodes = list(display_nodes) + [extra_node]
 
         # ── Color palette ─────────────────────────────────────────────
         color_palette   = px.colors.qualitative.Plotly
@@ -3177,16 +3368,19 @@ def update_full_graph_view(active_tab, color_mode, filter_metric, filter_range, 
         if color_mode == 'actual' and has_true_labels:
             node_value_map = {n: safe_int(true_labels, n, 0) for n in display_nodes}
             class_colors = [color_palette[c % len(color_palette)] for c in range(num_classes)]
-            legend_name_fn = lambda cls: f'Class {cls}'
+            legend_name_fn = lambda cls: class_name(dataset_name, cls)
+            legend_title = 'Actual class'
         elif color_mode == 'correctness' and has_true_labels:
             node_value_map = {n: 0 if safe_int(preds_arr, n, -1) == safe_int(true_labels, n, -2) else 1 for n in display_nodes}
-            class_colors = ['#28a745', '#e74c3c']
+            class_colors = [CORRECT_COLOR, INCORRECT_COLOR]
             num_classes = 2
             legend_name_fn = lambda cls: 'Correct' if cls == 0 else 'Incorrect'
+            legend_title = 'Prediction'
         else:
             node_value_map = {n: safe_int(preds_arr, n, 0) for n in display_nodes}
             class_colors = [color_palette[c % len(color_palette)] for c in range(num_classes)]
-            legend_name_fn = lambda cls: f'Class {cls}'
+            legend_name_fn = lambda cls: class_name(dataset_name, cls)
+            legend_title = 'Predicted class'
 
         # ── Edge trace ────────────────────────────────────────────────
         edge_x, edge_y = [], []
@@ -3215,7 +3409,7 @@ def update_full_graph_view(active_tab, color_mode, filter_metric, filter_range, 
         node_values = np.array([int(node_value_map.get(n, 0)) for n in G.nodes()])
         node_traces = []
         for cls in range(num_classes):
-            cls_nodes = [n for n, val in zip(G.nodes(), node_values) if val == cls]
+            cls_nodes = [n for n, val in zip(G.nodes(), node_values) if val == cls and n != sel_node_id]
             if not cls_nodes:
                 continue
 
@@ -3250,11 +3444,11 @@ def update_full_graph_view(active_tab, color_mode, filter_metric, filter_range, 
                 if actual_class is not None:
                     correct = pred_class == actual_class
                     hover_templates.append(
-                        f"Node {n}<br>Predicted: {pred_class}<br>Actual: {actual_class}<br>{'Correct' if correct else 'Incorrect'}<extra></extra>"
+                        f"Node {n}<br>Predicted: {class_name(dataset_name, pred_class)}<br>Actual: {class_name(dataset_name, actual_class)}<br>{'Correct' if correct else 'Incorrect'}<extra></extra>"
                     )
                 else:
                     hover_templates.append(
-                        f'Node {n}<br>Predicted: {pred_class}<extra></extra>'
+                        f'Node {n}<br>Predicted: {class_name(dataset_name, pred_class)}<extra></extra>'
                     )
 
             node_traces.append(go.Scatter(
@@ -3270,7 +3464,15 @@ def update_full_graph_view(active_tab, color_mode, filter_metric, filter_range, 
                 ),
                 hovertemplate=hover_templates,
                 customdata=cls_nodes,
-                name=f'{legend_title}: {legend_name_fn(cls)}',
+                name=legend_name_fn(cls),
+            ))
+
+        if sel_node_id is not None and sel_node_id in pos:
+            node_traces.append(go.Scatter(
+                x=[pos[sel_node_id][0]], y=[pos[sel_node_id][1]], mode='markers',
+                marker=dict(symbol='star', size=18, color='#FFD700', line=dict(width=1.5, color='#333')),
+                customdata=[sel_node_id], name=f'Selected (node {sel_node_id})',
+                hovertemplate=f'Selected: node {sel_node_id}<extra></extra>',
             ))
 
         title_text = (
@@ -3310,6 +3512,49 @@ def update_full_graph_view(active_tab, color_mode, filter_metric, filter_range, 
         })
 
 @callback(
+    Output('status-bar', 'children'),
+    Input('dataset-dropdown', 'value'),
+    Input('model-dropdown', 'value'),
+    Input('analysis-mode-store', 'data'),
+    Input('current-predictions-store', 'data'),
+    Input('selected-node-store', 'data'),
+    Input('selected-link-store', 'data'),
+    Input('explanation-store', 'data'),
+)
+def update_status_bar(dataset_name, model_type, analysis_mode, predictions_data, selected_node, selected_link, explanation):
+    """Breadcrumb of the current context plus the next step to take."""
+    task = 'Link prediction' if analysis_mode == 'link_prediction' else 'Node classification'
+    chips = [html.Span(f"{dataset_name} · {model_type} · {task}", className='chip chip-context')]
+
+    if not predictions_data:
+        chips.append(html.Span("Loading model…", className='chip chip-busy'))
+        return chips
+
+    if analysis_mode == 'link_prediction':
+        if selected_link:
+            chips.append(html.Span(f"Link {selected_link.get('source')} → {selected_link.get('target')}", className='chip'))
+            step = "Inspect the causal paths and subgraph below."
+        else:
+            step = ("Enter a source node, press RUN ANALYSIS, then click a predicted link "
+                    "(right panel) or a confusion-matrix cell.")
+    else:
+        node_id = (selected_node or {}).get('id')
+        explained = (isinstance(explanation, dict) and explanation.get('explanation_type') == 'node_classification'
+                     and not explanation.get('error')
+                     and str(explanation.get('node_idx')) == str(node_id))
+        if explanation and isinstance(explanation, dict) and explanation.get('error'):
+            chips.append(html.Span(explanation['error'], className='chip chip-error'))
+        if node_id is None:
+            step = "Click a node in the embedding plot or full graph, or type an ID under Selection."
+        else:
+            chips.append(html.Span(f"Node {node_id}", className='chip'))
+            step = ("Explanation ready: see the Explanation tab." if explained
+                    else "Press RUN ANALYSIS to explain this node.")
+    chips.append(html.Span(step, className='next-step'))
+    return chips
+
+
+@callback(
     Output('analysis-mode-store', 'data'),
     Output('selection-interface', 'children'),
     Output('dynamic-analysis-tabs', 'children'),
@@ -3328,14 +3573,14 @@ def update_analysis_mode(mode):
                     dcc.Input(
                         id={'type': 'lp-input', 'index': 'source-active'},
                         type='number', placeholder='Source', min=0, step=1,
-                        style={'width': '100%'}
+                        style={'width': '100px'}
                     )
                 ]),
                 html.Div(style={'flex': '1'}, children=[
                     dcc.Input(
                         id={'type': 'lp-input', 'index': 'target-active'},
-                        type='number', placeholder='Target', min=0, step=1,
-                        style={'width': '100%'}
+                        type='number', placeholder='Target (optional)', min=0, step=1,
+                        style={'width': '130px'}
                     )
                 ])
             ])
@@ -3398,7 +3643,7 @@ def toggle_node_classification_section(mode):
     prevent_initial_call=False
 
 )
-
+@serialize_model_use
 def load_initial_data(dataset_name, model_type):
 
     try:
@@ -3590,7 +3835,7 @@ def update_edges(add_clicks, remove_clicks, add_clicks_lp, remove_clicks_lp, sou
     prevent_initial_call=True
 
 )
-
+@serialize_model_use
 def update_predictions_on_edit(graph_data, dataset_meta, package_meta, model_type):
 
     try:
@@ -3621,14 +3866,21 @@ def update_predictions_on_edit(graph_data, dataset_meta, package_meta, model_typ
     Output('selected-node-store', 'data'),
     Input('graph-view', 'tapNodeData'),
     Input('embeddings-view', 'clickData'),
+    Input('full-graph-view', 'clickData'),
+    prevent_initial_call=True,
 )
-def update_selected_node(tapNode, emb_click):
+def update_selected_node(tapNode, emb_click, full_click):
     trigger_id, node_id = ctx.triggered_id, None
 
     if trigger_id == 'graph-view' and tapNode:
         node_id = tapNode['id']
-    elif trigger_id == 'embeddings-view' and emb_click:
-        node_id = emb_click['points'][0]['customdata'][0]
+    elif trigger_id in ('embeddings-view', 'full-graph-view'):
+        click = emb_click if trigger_id == 'embeddings-view' else full_click
+        cd = ((click or {}).get('points') or [{}])[0].get('customdata')
+        if isinstance(cd, (list, tuple)):
+            cd = cd[0] if cd else None
+        if cd is not None:
+            node_id = cd
 
     if node_id is not None:
         print(f"[SELECTED_NODE] update_selected_node triggered by {trigger_id}, node_id={node_id}")
@@ -3806,7 +4058,7 @@ def update_selected_path(main_clicks, side_clicks, run_clicks):
     prevent_initial_call=True
 
 )
-
+@serialize_model_use
 def generate_link_explanation_on_select(selected_link, run_clicks, graph_data, package_meta, dataset_meta, model_type, analysis_mode):
 
     """Generates a link explanation automatically when a link is selected."""
@@ -3900,7 +4152,7 @@ def generate_link_explanation_on_select(selected_link, run_clicks, graph_data, p
     prevent_initial_call=True
 
 )
-
+@serialize_model_use
 def run_explainer(n_clicks, selected_node, selected_link, lp_inputs, graph_data, package_meta, dataset_meta, predictions_data, model_type, analysis_mode, active_layer3_tab):
 
     try:
@@ -4015,7 +4267,8 @@ def run_explainer(n_clicks, selected_node, selected_link, lp_inputs, graph_data,
                 'edge_mask': explanation.get('edge_mask').cpu().tolist() if explanation.get('edge_mask') is not None else None,
                 'node_importance': node_importance,
                 'feature_importance': feature_imp,
-                'explanation_type': 'node_classification'
+                'explanation_type': 'node_classification',
+                'node_idx': node_idx,
             }, "RUN ANALYSIS", False
 
         return no_update, "RUN ANALYSIS", False
@@ -4067,7 +4320,7 @@ def run_explainer(n_clicks, selected_node, selected_link, lp_inputs, graph_data,
     prevent_initial_call=True
 
 )
-
+@serialize_model_use
 def run_link_prediction_unified(predict_clicks, global_clicks,
 
                                 selected_node, selected_link, lp_inputs, lp_input_ids, link_source_input,
@@ -4253,7 +4506,7 @@ def run_link_prediction_unified(predict_clicks, global_clicks,
     prevent_initial_call=True
 
 )
-
+@serialize_model_use
 def run_cpa_iv_callback(n_clicks, selected_node, package_meta, dataset_meta, graph_data, model_type):
 
     try:
@@ -4312,6 +4565,7 @@ def run_cpa_iv_callback(n_clicks, selected_node, package_meta, dataset_meta, gra
     State('link-target-input', 'value'),
     prevent_initial_call=True
 )
+@serialize_model_use
 def run_cpa_iv_callback_active(global_clicks, layer3_clicks, selected_link_trigger,
                                selected_node, selected_link_state, package_meta, dataset_meta, graph_data, model_type,
                                analysis_mode, active_layer3_tab,
@@ -4509,8 +4763,10 @@ def update_causal_layer3_status(status_data):
 )
 def update_mid_layer(n_clicks, predictions_data, cpa_data, link_cpa_data, package, dataset, selected_node, active_layer3_tab, analysis_mode, selected_link, link_prediction_store):
     try:
-        empty_fig = go.Figure(layout={'title': "Waiting for model...", 'paper_bgcolor':'rgba(0,0,0,0)', 'plot_bgcolor':'rgba(0,0,0,0)'})
-        gnn_style = {'marginBottom': '10px', 'display': 'block'}
+        empty_fig = empty_figure("Loading model…")
+        gnn_style = {'flex': '1', 'minWidth': '300px', 'minHeight': '0', 'height': '100%', 'maxHeight': '100%',
+                     'margin': '0', 'overflow': 'hidden', 'boxSizing': 'border-box',
+                     'display': 'flex', 'flexDirection': 'column'}
 
         # Ensure we have the full cached dataset (callbacks may pass metadata only)
         dataset_full = get_cached_dataset_if_missing(dataset)
@@ -4522,8 +4778,8 @@ def update_mid_layer(n_clicks, predictions_data, cpa_data, link_cpa_data, packag
         preds = np.array(predictions_data['preds'])
         true_labels = np.array(dataset_full['y'])
         num_classes = dataset_full['num_classes']
-        color_palette = px.colors.qualitative.Plotly
-        class_to_color_map = {i: color_palette[i % len(color_palette)] for i in range(num_classes)}
+        dataset_name = dataset_full.get('name')
+        class_to_color_map = class_color_map(num_classes)
 
         selected_node_id_str = selected_node['id'] if selected_node else None
         target_node_id_str = None
@@ -4536,7 +4792,7 @@ def update_mid_layer(n_clicks, predictions_data, cpa_data, link_cpa_data, packag
         if embeddings_2d is None:
             embeddings_fig = go.Figure(layout={'title': "Embeddings Not Available"})
         else:
-            embeddings_fig = plot_embeddings(np.array(embeddings_2d), preds, true_labels, selected_node_id_str, class_to_color_map, num_classes, target_node_id=target_node_id_str)
+            embeddings_fig = plot_embeddings(np.array(embeddings_2d), preds, true_labels, selected_node_id_str, class_to_color_map, num_classes, target_node_id=target_node_id_str, dataset_name=dataset_name)
 
         # If there are active link predictions, the subgraph evaluation
         # callback is responsible for rendering the confusion matrix. Avoid
@@ -4552,15 +4808,24 @@ def update_mid_layer(n_clicks, predictions_data, cpa_data, link_cpa_data, packag
             return embeddings_fig, no_update, gnn_style
 
         from sklearn.metrics import confusion_matrix
-        cm = confusion_matrix(true_labels, preds)
+        cm = confusion_matrix(true_labels, preds, labels=list(range(num_classes)))
+        # Numeric x/y keep clickData parseable by update_edge_list_from_cm;
+        # class names are shown as tick labels only.
+        names = [class_name(dataset_name, i) for i in range(num_classes)]
+        hover = [[f"Actual: {names[a]}<br>Predicted: {names[p]}<br>{cm[a][p]} nodes<br><i>click to list them</i>"
+                  for p in range(num_classes)] for a in range(num_classes)]
         cm_fig = go.Figure(data=go.Heatmap(
-            z=cm, x=[str(i) for i in range(num_classes)], y=[str(i) for i in range(num_classes)],
-            colorscale='Blues', text=cm, texttemplate="%{text}", hoverongaps=False
+            z=cm, x=list(range(num_classes)), y=list(range(num_classes)),
+            colorscale='Blues', text=cm, texttemplate="%{text}", hoverongaps=False,
+            hovertext=hover, hovertemplate="%{hovertext}<extra></extra>", showscale=False,
         ))
+        short = CLASS_SHORT_NAMES.get(dataset_name) or names
         cm_fig.update_layout(
-            title="Global Confusion Matrix",
-            xaxis_title="Predicted",
-            yaxis_title="Actual",
+            title=dict(text="Confusion matrix (click a cell)", x=0.5, font=dict(size=13)),
+            xaxis=dict(title="Predicted", tickmode='array', tickvals=list(range(num_classes)), ticktext=short, tickangle=-30),
+            yaxis=dict(title="Actual", tickmode='array', tickvals=list(range(num_classes)), ticktext=short, autorange='reversed'),
+            margin=dict(l=10, r=10, t=36, b=10),
+            paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
             clickmode='event+select',
             dragmode=False
         )
@@ -4584,60 +4849,44 @@ def update_mid_layer(n_clicks, predictions_data, cpa_data, link_cpa_data, packag
     Output('performance-metrics', 'children', allow_duplicate=True),
     Output('performance-metrics', 'style', allow_duplicate=True),
     Input('global-run-button', 'n_clicks'),
-    State('current-predictions-store', 'data'),
+    Input('current-predictions-store', 'data'),
     State('full-dataset-store', 'data'),
     State('analysis-mode-store', 'data'),
     prevent_initial_call=True,
 )
 def update_node_performance_metrics(run_clicks, predictions_data, dataset_meta, analysis_mode):
     try:
-        # Only compute metrics when run button has been pressed and mode is node classification
-        if not run_clicks or analysis_mode != 'node_classification':
+        # Node-classification metrics, shown as soon as predictions exist
+        if analysis_mode != 'node_classification':
             return no_update, no_update
 
         if not predictions_data or not dataset_meta:
             return no_update, no_update
 
-        # dataset_meta may be a lightweight metadata dict; ensure we have full dataset with labels
-        dataset_full = dataset_meta
-        if isinstance(dataset_meta, dict) and 'y' not in dataset_meta:
-            dataset_full = get_cached_dataset_if_missing(dataset_meta)
-
+        dataset_full = get_cached_dataset_if_missing({'name': dataset_meta.get('name')}) if isinstance(dataset_meta, dict) else None
         if not dataset_full or 'y' not in dataset_full:
             return no_update, no_update
 
         preds = np.array(predictions_data.get('preds', []))
-        true = np.array(dataset_full.get('y', []))
+        true = np.asarray(dataset_full['y'])
         if preds.size == 0 or true.size == 0:
             return no_update, no_update
 
-        from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+        from sklearn.metrics import accuracy_score, f1_score
 
-        accuracy = accuracy_score(true, preds)
-        precision = precision_score(true, preds, average='macro', zero_division=0)
-        recall = recall_score(true, preds, average='macro', zero_division=0)
-        f1 = f1_score(true, preds, average='macro', zero_division=0)
+        items = []
+        test_mask = dataset_full.get('test_mask')
+        if test_mask is not None:
+            tm = np.asarray(test_mask, dtype=bool)
+            items.append(("Test acc", float(accuracy_score(true[tm], preds[tm])),
+                          f"Accuracy on the {int(tm.sum())} standard Planetoid test nodes"))
+        items.append(("All-node acc", float(accuracy_score(true, preds)),
+                      "Accuracy over every node, including the training nodes"))
+        items.append(("Macro F1", float(f1_score(true, preds, average='macro', zero_division=0)),
+                      "Macro-averaged F1 over every node"))
+        metrics = metric_tiles(items)
 
-        metrics = [
-            html.Div(children=[
-                html.H4(f"{accuracy:.3f}", style={'margin': '0', 'fontSize': '16px', 'fontWeight': '700'}),
-                html.P("Accuracy", style={'margin': '0', 'fontSize': '16px', 'color': '#666', 'textTransform': 'uppercase'})
-            ], style={'textAlign': 'center'}),
-            html.Div(children=[
-                html.H4(f"{precision:.3f}", style={'margin': '0', 'fontSize': '16px', 'fontWeight': '700'}),
-                html.P("Precision", style={'margin': '0', 'fontSize': '16px', 'color': '#666', 'textTransform': 'uppercase'})
-            ], style={'textAlign': 'center'}),
-            html.Div(children=[
-                html.H4(f"{recall:.3f}", style={'margin': '0', 'fontSize': '16px', 'fontWeight': '700'}),
-                html.P("Recall", style={'margin': '0', 'fontSize': '16px', 'color': '#666', 'textTransform': 'uppercase'})
-            ], style={'textAlign': 'center'}),
-            html.Div(children=[
-                html.H4(f"{f1:.3f}", style={'margin': '0', 'fontSize': '16px', 'fontWeight': '700'}),
-                html.P("F1-Score", style={'margin': '0', 'fontSize': '16px', 'color': '#666', 'textTransform': 'uppercase'})
-            ], style={'textAlign': 'center'}),
-        ]
-
-        perf_style = {'display': 'flex', 'gap': '8px', 'alignItems': 'center', 'flex': '0 0 auto', 'fontWeight': 'bold'}
+        perf_style = {'display': 'flex'}
 
         return metrics, perf_style
 
@@ -4677,6 +4926,8 @@ def update_node_performance_metrics(run_clicks, predictions_data, dataset_meta, 
 
     Input('analysis-mode-store', 'data'),
 
+    Input('subgraph-color-mode', 'value'),
+
     State('current-predictions-store', 'data'),
 
     State('full-dataset-store', 'data'),
@@ -4693,10 +4944,10 @@ def update_node_performance_metrics(run_clicks, predictions_data, dataset_meta, 
 
 )
 
-def update_bottom_layer(selected_link, selected_node, explanation, cpa_data, link_cpa_data, selected_path, analysis_mode, predictions_data, dataset, graph_data, package_meta, model_type, active_layer3_tab):
+def update_bottom_layer(selected_link, selected_node, explanation, cpa_data, link_cpa_data, selected_path, analysis_mode, subgraph_color_mode, predictions_data, dataset, graph_data, package_meta, model_type, active_layer3_tab):
     try:
-        empty_fig = go.Figure(layout={'title': "", 'paper_bgcolor':'rgba(0,0,0,0)', 'plot_bgcolor':'rgba(0,0,0,0)'})
-        subgraph_color_mode = 'actual'
+        empty_fig = empty_figure()
+        subgraph_color_mode = subgraph_color_mode or 'actual'
 
         # Visibility Rule: Only show if specific selection exists
         visible = False
@@ -4718,12 +4969,15 @@ def update_bottom_layer(selected_link, selected_node, explanation, cpa_data, lin
         # Ensure we have the full cached dataset (may be metadata passed in state)
         dataset = get_cached_dataset_if_missing(dataset)
         if not visible or not dataset or not graph_data or not predictions_data:
-            return [], empty_fig, empty_fig, "Select item to view details", "Details", None, {'display': 'none'}
+            hint = ("Pick a predicted link from the list above to inspect it."
+                    if analysis_mode == 'link_prediction' else "Load a model to begin.")
+            return [], empty_fig, empty_fig, html.Div(hint, className='empty-hint'), "Details", None, {'display': 'none'}
 
         preds = np.array(predictions_data['preds'])
         num_classes = dataset['num_classes']
-        color_palette = px.colors.qualitative.Plotly
-        class_to_color_map = {i: color_palette[i % len(color_palette)] for i in range(num_classes)}
+        dataset_name = dataset.get('name')
+        class_to_color_map = class_color_map(num_classes)
+        color_key = subgraph_color_key(subgraph_color_mode, dataset_name, num_classes)
         true_labels = dataset.get('y') if isinstance(dataset, dict) else None
         yvals = true_labels
 
@@ -4780,7 +5034,7 @@ def update_bottom_layer(selected_link, selected_node, explanation, cpa_data, lin
             # Determine prediction class (Edge vs No Edge) based on threshold
             predicted_label = 1 if real_score > 0.5 else 0
             pred_text = "Edge Predicted" if predicted_label == 1 else "No Edge"
-            pred_color = "green" if predicted_label == 1 else "red"
+            pred_color = CORRECT_COLOR if predicted_label == 1 else INCORRECT_COLOR
 
             # Ground Truth Check
             is_existing_link = False
@@ -4801,7 +5055,7 @@ def update_bottom_layer(selected_link, selected_node, explanation, cpa_data, lin
             ground_truth_label = 1 if is_existing_link else 0
             is_correct = (predicted_label == ground_truth_label)
             correctness_label = "(True)" if is_correct else "(False)"
-            badge_color = "#28a745" if is_correct else "#dc3545"
+            badge_color = CORRECT_COLOR if is_correct else INCORRECT_COLOR
 
             # Additional Path Info
             path_info_div = html.Div()
@@ -4857,7 +5111,8 @@ def update_bottom_layer(selected_link, selected_node, explanation, cpa_data, lin
                     html.Span("View Radius:", style={'fontWeight': 'bold', 'color': '#333'}),
                     html.Span(f" 1-hop", style={'marginLeft': '5px', 'color': '#666'})
                 ], style={'marginBottom': '8px'}),
-                path_info_div
+                path_info_div,
+                color_key,
             ], style={'padding': '15px', 'backgroundColor': '#f8f9fa', 'borderRadius': '4px', 'border': '1px solid #dee2e6'})
 
             # 4. RENDER GRAPH
@@ -4884,7 +5139,8 @@ def update_bottom_layer(selected_link, selected_node, explanation, cpa_data, lin
                     if int(n) not in (int(u), int(v)):
                         node_imp[int(n)] = float(s)
                 if node_imp:
-                    neighbor_fig = plot_neighbor_importance(node_imp, u)
+                    neighbor_fig = plot_neighbor_importance(node_imp, u, preds=preds, y_labels=true_labels,
+                                                            dataset_name=dataset_name)
                     try:
                         neighbor_fig.update_layout(title=f'Top Neighbor Importance')
                     except Exception:
@@ -4977,6 +5233,10 @@ def update_bottom_layer(selected_link, selected_node, explanation, cpa_data, lin
         # B. NODE CLASSIFICATION MODE (Standard)
         else:
             header_text = "Node Neighborhood & Importance"
+            # Never show one node's explanation on another node's subgraph
+            if isinstance(explanation, dict) and explanation.get('node_idx') is not None \
+                    and int(explanation['node_idx']) != int(target_node_idx):
+                explanation = None
             if target_node_idx != -1:
                 # Determine actual class if available in dataset
                 actual_class = None
@@ -4996,25 +5256,34 @@ def update_bottom_layer(selected_link, selected_node, explanation, cpa_data, lin
                     actual_class = None
                     yvals = None
 
+                pred_cls = int(preds[target_node_idx])
+                is_correct = actual_class is not None and pred_cls == actual_class
+                conf = None
+                try:
+                    conf = float(predictions_data.get('confidences', [])[target_node_idx])
+                except Exception:
+                    pass
+                conf_text = f"  ({conf:.0%})" if conf is not None else ""
                 legend_content = html.Div([
                     html.Div([
-                        html.Span("Selected Node:", style={'fontWeight': 'bold'}),
-                        html.Span(f" {target_node_idx}", style={'marginLeft': '5px', 'fontFamily': 'monospace'})
-                    ], style={'marginBottom': '5px'}),
-                    html.Div([
-                        html.Span("Predicted Class:", style={'fontWeight': 'bold'}),
-                        html.Span(f" {preds[target_node_idx]}", style={'marginLeft': '5px'})
-                    ], style={'marginBottom': '5px'}),
-                    html.Div([
-                        html.Span("Actual Class:", style={'fontWeight': 'bold'}),
-                        html.Span(f" {actual_class if actual_class is not None else 'N/A'}", style={'marginLeft': '5px'})
-                    ])
-                ], style={'padding': '10px'})
+                        html.Span(f"Node {target_node_idx}", className='legend-title'),
+                        html.Span("correct" if is_correct else "misclassified",
+                                  className='pill', style={'backgroundColor': CORRECT_COLOR if is_correct else INCORRECT_COLOR})
+                        if actual_class is not None else None,
+                    ], className='legend-row'),
+                    html.Div([html.Span("Predicted", className='legend-label'),
+                              html.Span(class_name(dataset_name, pred_cls) + conf_text)], className='legend-row'),
+                    html.Div([html.Span("Actual", className='legend-label'),
+                              html.Span(class_name(dataset_name, actual_class) if actual_class is not None else 'N/A')],
+                             className='legend-row'),
+                    color_key,
+                ], className='legend-card')
             else:
                 legend_content = html.Div([
-                    html.Div("No node selected.", style={'fontStyle': 'italic', 'color': '#999'}),
-                 #   html.Div("Showing full graph view.", style={'fontSize': '12px', 'marginTop': '5px'})
-                ], style={'padding': '10px'})
+                    html.Div("No node selected", className='legend-title'),
+                    html.Div("Click a point in the embedding plot or the full graph, or type a node ID "
+                             "under Selection, then press RUN ANALYSIS to explain it.", className='empty-hint'),
+                ], className='legend-card')
 
             # Standard Graph Rendering
             graph_elements, _ = create_subgraph_cytoscape(
@@ -5026,11 +5295,12 @@ def update_bottom_layer(selected_link, selected_node, explanation, cpa_data, lin
 
             # Importance Plot - only when a node is selected
             if target_node_idx == -1:
-                neighbor_fig = empty_fig
+                neighbor_fig = empty_figure("Select a node to list its neighbours")
             else:
                 node_imp = None
                 if explanation and isinstance(explanation, dict) and 'node_importance' in explanation:
-                    node_imp = explanation.get('node_importance') or {}
+                    # Store round-trips through JSON, so keys arrive as strings
+                    node_imp = {int(k): float(v) for k, v in (explanation.get('node_importance') or {}).items()}
 
                 if not node_imp or len(node_imp) == 0:
                     try:
@@ -5046,7 +5316,8 @@ def update_bottom_layer(selected_link, selected_node, explanation, cpa_data, lin
                         target_node_idx,
                         preds=preds,
                         y_labels=yvals,
-                        one_hop_neighbors=one_hop_neighbors
+                        one_hop_neighbors=one_hop_neighbors,
+                        dataset_name=dataset_name,
                     )
                 else:
                     neighbor_fig = plot_neighbor_importance(
@@ -5054,8 +5325,9 @@ def update_bottom_layer(selected_link, selected_node, explanation, cpa_data, lin
                         target_node_idx,
                         preds=preds,
                         y_labels=yvals,
-                        one_hop_neighbors=one_hop_neighbors
-                    ) if one_hop_neighbors else empty_fig
+                        one_hop_neighbors=one_hop_neighbors,
+                        dataset_name=dataset_name,
+                    ) if one_hop_neighbors else empty_figure(f"Node {target_node_idx} has no neighbours")
 
             # CPA Panel is shown in the merged Explanation frame.
             cpa_panel = create_cpa_iv_panel(cpa_data, target_node_idx) if cpa_data else None
@@ -5084,7 +5356,10 @@ def update_bottom_layer(selected_link, selected_node, explanation, cpa_data, lin
                             # use absolute magnitude to pick top features
                             idxs = np.argsort(np.abs(arr))[-10:][::-1]
                             feat_dict = {int(i): float(arr[int(i)]) for i in idxs}
-                            feature_fig = plot_feature_importance(feat_dict, target_node_idx, top_k=10)
+                            # Not an explanation yet: label honestly as raw input values
+                            feature_fig = plot_feature_importance(
+                                feat_dict, target_node_idx, top_k=10,
+                                title=f'Raw feature values, node {target_node_idx} (run analysis for importance)')
                         else:
                             feature_fig = empty_fig
                     else:
@@ -5142,7 +5417,8 @@ def update_link_list(link_predictions):
 
     link_output = html.Div([
 
-        html.H4("Top Link Predictions", style={'fontSize': '14px', 'fontWeight': 'bold', 'color': '#333'}),
+        html.Div(f"Top predicted links for node {source_node}", className='legend-title', style={'marginTop': '8px'}),
+        html.Div("Click a link to explain it below.", className='empty-hint'),
 
         html.Div([
 
@@ -5157,6 +5433,8 @@ def update_link_list(link_predictions):
             id={'type': 'link-prediction-item', 'index': i, 'source': source_node, 'target': pred['target']},
 
             n_clicks=0,
+
+            className='link-item',
 
             style=    {
 
@@ -5184,11 +5462,10 @@ def update_link_list(link_predictions):
 
     ])
 
-    # Do not render the bar chart or duplicate the prediction list in the
-    # bottom container — return an empty container so only the top list
-    # (edge-predictions-display) is used for displaying link lists.
+    # Render the clickable list (it was built but never returned, so predicted
+    # links for the source node were invisible). The bar chart stays hidden.
     link_fig = go.Figure()
-    return html.Div([], style={'minHeight': '0'}), link_fig, {'display': 'none', 'height': '0px'}
+    return link_output, link_fig, {'display': 'none', 'height': '0px'}
 
 # Subgraph evaluation callback
 
@@ -5221,7 +5498,7 @@ def update_link_list(link_predictions):
     prevent_initial_call=True
 
 )
-
+@serialize_model_use
 def evaluate_subgraph_predictions(link_pred_data, analysis_mode, package, dataset, model_type, dataset_name, graph_type):
 
     """Evaluate edge predictions on subgraph and show confusion matrix."""
@@ -5504,7 +5781,7 @@ def evaluate_subgraph_predictions(link_pred_data, analysis_mode, package, datase
 
             for i, (edge, pred, true) in enumerate(zip(removed_edges[:10], predicted_labels[:10], true_labels[:10])):  # Show first 10
 
-                color = "#28a745" if pred == true else "#dc3545"
+                color = CORRECT_COLOR if pred == true else INCORRECT_COLOR
 
                 status = "Correct" if pred == true else "Wrong"
 
@@ -5534,63 +5811,17 @@ def evaluate_subgraph_predictions(link_pred_data, analysis_mode, package, datase
 
                 )
 
-            # Create performance metrics - Flat Design
-
-            metrics = [
-
-                html.Div(className='three columns', children=[
-
-                    html.Div([
-
-                        html.H4(f"{accuracy:.3f}", style={'margin': '0', 'color': '#333', 'fontSize': '18px', 'fontWeight': 'bold'}),
-
-                        html.P("Accuracy", style={'margin': '0', 'fontSize': '11px', 'color': '#666', 'textTransform': 'uppercase'})
-
-                    ], style={'textAlign': 'center', 'padding': '10px', 'border': '1px solid #ddd', 'backgroundColor': '#fff'})
-
-                ]),
-
-                html.Div(className='three columns', children=[
-
-                    html.Div([
-
-                        html.H4(f"{precision:.3f}", style={'margin': '0', 'color': '#333', 'fontSize': '18px', 'fontWeight': 'bold'}),
-
-                        html.P("Precision", style={'margin': '0', 'fontSize': '11px', 'color': '#666', 'textTransform': 'uppercase'})
-
-                    ], style={'textAlign': 'center', 'padding': '10px', 'border': '1px solid #ddd', 'backgroundColor': '#fff'})
-
-                ]),
-
-                html.Div(className='three columns', children=[
-
-                    html.Div([
-
-                        html.H4(f"{recall:.3f}", style={'margin': '0', 'color': '#333', 'fontSize': '18px', 'fontWeight': 'bold'}),
-
-                        html.P("Recall", style={'margin': '0', 'fontSize': '11px', 'color': '#666', 'textTransform': 'uppercase'})
-
-                    ], style={'textAlign': 'center', 'padding': '10px', 'border': '1px solid #ddd', 'backgroundColor': '#fff'})
-
-                ]),
-
-                html.Div(className='three columns', children=[
-
-                    html.Div([
-
-                        html.H4(f"{f1:.3f}", style={'margin': '0', 'color': '#333', 'fontSize': '18px', 'fontWeight': 'bold'}),
-
-                        html.P("F1-Score", style={'margin': '0', 'fontSize': '11px', 'color': '#666', 'textTransform': 'uppercase'})
-
-                    ], style={'textAlign': 'center', 'padding': '10px', 'border': '1px solid #ddd', 'backgroundColor': '#fff'})
-
-                ])
-
-            ]
+            # Performance metrics on the held-out (removed) edges
+            metrics = metric_tiles([
+                ("Accuracy", float(accuracy), "Link accuracy on the removed (held-out) edges and sampled non-edges"),
+                ("Precision", float(precision), "Of predicted links, the share that are real"),
+                ("Recall", float(recall), "Of real removed edges, the share recovered"),
+                ("F1", float(f1), "Harmonic mean of precision and recall"),
+            ])
 
             status_msg = f"✅ Evaluated {len(removed_edges)} removed edges"
 
-            perf_style = {'display': 'flex', 'gap': '6px', 'alignItems': 'center', 'flex': '0 0 auto', 'fontWeight': 'bold'}
+            perf_style = {'display': 'flex'}
 
             return status_msg, fig, edge_predictions, metrics, perf_style, {'TP': tp_list, 'FP': fp_list, 'FN': fn_list, 'TN': tn_list}, "Confusion Matrix Details"
 
@@ -5799,16 +6030,18 @@ def update_edge_list_from_cm(clickData, eval_data, analysis_mode, predictions_da
             print(f"[CM Click] Node class cell ({actual_class}→{pred_class}): {count} nodes found")
 
             is_diagonal = (pred_class == actual_class)
+            ds_name = dataset.get('name') if isinstance(dataset, dict) else None
+            pred_name, actual_name = class_name(ds_name, pred_class), class_name(ds_name, actual_class)
             if is_diagonal:
-                badge_color = '#27ae60'
-                label       = f'Correctly classified as Class {pred_class}'
-                description = (f'{count} node{"s" if count != 1 else ""} with true class '
-                               f'{actual_class} correctly predicted as class {pred_class}')
+                badge_color = CORRECT_COLOR
+                label       = f'Correctly classified as {pred_name}'
+                description = (f'{count} node{"s" if count != 1 else ""} of class '
+                               f'{actual_name} predicted correctly')
             else:
-                badge_color = '#e74c3c'
-                label       = f'Actual Class {actual_class} → Predicted Class {pred_class}'
-                description = (f'{count} node{"s" if count != 1 else ""} with true class '
-                               f'{actual_class} wrongly predicted as class {pred_class}')
+                badge_color = INCORRECT_COLOR
+                label       = f'{actual_name} → predicted {pred_name}'
+                description = (f'{count} node{"s" if count != 1 else ""} of class '
+                               f'{actual_name} wrongly predicted as {pred_name}')
 
             header = _badge_div(label, count, 'nodes', badge_color, description)
 
@@ -6069,11 +6302,12 @@ def reset_application(n_clicks):
     Input('selected-node-store', 'data'),
     Input('analysis-mode-store', 'data'),
     Input('reset-button', 'n_clicks'),
+    Input('current-predictions-store', 'data'),
     State('layer3-tabs', 'value'),
     prevent_initial_call=False
 )
 
-def manage_layer_visibility(run_clicks, selected_link, selected_node, analysis_mode, reset_clicks, active_layer3_tab):
+def manage_layer_visibility(run_clicks, selected_link, selected_node, analysis_mode, reset_clicks, predictions_data, active_layer3_tab):
     """
     3-LAYER SEQUENTIAL FLOW:
       Step 1 — RUN clicked  : Layer 2 visible, Layer 3 hidden.
@@ -6087,11 +6321,10 @@ def manage_layer_visibility(run_clicks, selected_link, selected_node, analysis_m
     l2_visible = {'display': 'block', 'borderTop': '2px solid #dee2e6', 'paddingTop': '15px', 'marginTop': '10px', 'height': '49.5vh', 'maxHeight': '49.5vh', 'overflow': 'hidden', 'boxSizing': 'border-box'}
     l3_visible = {'display': 'block', 'borderTop': '2px solid #dee2e6', 'paddingTop': '15px', 'marginTop': '10px', 'minHeight': '48vh', 'overflow': 'hidden'}
 
-    # Nothing shown before Run is clicked
-    if not run_clicks or run_clicks == 0:
+    # Show the overview as soon as a model is loaded; RUN is only needed to explain.
+    if not predictions_data and not run_clicks:
         return l2_hidden, l3_hidden
 
-    # Show both Layer 2 and Layer 3 after the first analysis run so the detail section is always available.
     return l2_visible, l3_visible
 
 # --- Client-side Callbacks ---
@@ -6451,7 +6684,7 @@ def _make_path_network_figure(path_nodes, all_paths, source, target):
     State('analysis-mode-store', 'data'),
     prevent_initial_call=True
 )
-
+@serialize_model_use
 def run_stability_callback(n_clicks, sigma, sample_size,
                             package, dataset, graph_data, predictions_data, model_type,
                             analysis_mode):
@@ -6684,7 +6917,7 @@ def render_stability_plots(results, plot_type, metric_type):
     # Force correct column to Python bool (JSON round-trip can sometimes produce int 0/1)
     df['correct'] = df['correct'].apply(lambda v: bool(v))
 
-    color_map = {True: '#28a745', False: '#dc3545'}
+    color_map = {True: CORRECT_COLOR, False: INCORRECT_COLOR}
     label_map = {True: 'Correct', False: 'Wrong'}
     df['color'] = df['correct'].map(color_map)
     df['label'] = df['correct'].map(label_map)
@@ -7317,8 +7550,8 @@ def render_stability_plots(results, plot_type, metric_type):
                  style={'fontSize': '11px', 'fontWeight': 'bold', 'color': '#555',
                         'marginBottom': '4px', 'marginTop': '4px'}),
         _row('Nodes analysed',     str(len(df))),
-        _row('Avg S (correct)',    _fmt(avg_stab_c), '#28a745'),
-        _row('Avg S (wrong)',      _fmt(avg_stab_w), '#dc3545'),
+        _row('Avg S (correct)',    _fmt(avg_stab_c), CORRECT_COLOR),
+        _row('Avg S (wrong)',      _fmt(avg_stab_w), INCORRECT_COLOR),
         _row('Gap  S(C) − S(W)',   _fmt(stab_gap),
              '#007bff' if not pd.isna(stab_gap) and stab_gap > 0 else '#dc3545'),
         _row('t-test p' + _sig(t_pval), _fmt(t_pval, 4)),
@@ -7340,8 +7573,8 @@ def render_stability_plots(results, plot_type, metric_type):
         html.Div("Lipschitz Sensitivity  L(v)",
                  style={'fontSize': '11px', 'fontWeight': 'bold', 'color': '#555',
                         'marginBottom': '4px'}),
-        _row('Avg L (correct)', _fmt(avg_lip_c), '#28a745'),
-        _row('Avg L (wrong)',   _fmt(avg_lip_w), '#dc3545'),
+        _row('Avg L (correct)', _fmt(avg_lip_c), CORRECT_COLOR),
+        _row('Avg L (wrong)',   _fmt(avg_lip_w), INCORRECT_COLOR),
         _row('t-test p' + _sig(lip_pval), _fmt(lip_pval, 4)),
 
         html.Hr(style={'margin': '6px 0', 'borderColor': '#eee'}),
@@ -7350,8 +7583,8 @@ def render_stability_plots(results, plot_type, metric_type):
         html.Div("Explanation Fidelity",
                  style={'fontSize': '11px', 'fontWeight': 'bold', 'color': '#555',
                         'marginBottom': '4px'}),
-        _row('Avg fidelity (correct)', _fmt(avg_fid_c), '#28a745'),
-        _row('Avg fidelity (wrong)',   _fmt(avg_fid_w), '#dc3545'),
+        _row('Avg fidelity (correct)', _fmt(avg_fid_c), CORRECT_COLOR),
+        _row('Avg fidelity (wrong)',   _fmt(avg_fid_w), INCORRECT_COLOR),
         _row('t-test p' + _sig(fid_pval), _fmt(fid_pval, 4)),
 
         html.Div("* p < 0.05",
@@ -7639,7 +7872,7 @@ def render_drilldown_scatter(click_data, epsilon, plot_type, results):
         return _empty(msg, '#999'), header
 
     # ── Build drill-down scatter figure ──────────────────────────────────────
-    color_map = {True: '#28a745', False: '#dc3545'}
+    color_map = {True: CORRECT_COLOR, False: INCORRECT_COLOR}
     label_map = {True: 'Correct',  False: 'Wrong'}
     has_lip   = 'lipschitz' in subset.columns
 
