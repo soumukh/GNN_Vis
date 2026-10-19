@@ -824,6 +824,24 @@ def instantiate_model(package, model_type, num_features, num_classes, verbose=Fa
 
 # --- Visualization Helpers ---
 
+_EXPLAIN_CARD = {'backgroundColor': '#f8f9ff', 'border': '1px solid #dde', 'borderRadius': '6px',
+                 'padding': '12px', 'boxSizing': 'border-box'}
+
+
+def explanation_cards(cpa_content, attention_content):
+    """CPA-IV card at exactly the Local Subgraph column width; the GAT attention
+    card takes the remaining space to its right (instead of both sharing the
+    subgraph width). Width maths: see the explain-row note on .cpa-frame."""
+    cards = []
+    if cpa_content:
+        cards.append(html.Div(cpa_content, className='cpa-card',
+                              style={**_EXPLAIN_CARD, 'width': 'calc((100% - 50px) / 2)', 'flex': '0 0 auto'}))
+    if attention_content:
+        cards.append(html.Div(attention_content, className='attention-card',
+                              style={**_EXPLAIN_CARD, 'flex': '1 1 0', 'minWidth': '280px'}))
+    return html.Div(cards, style={'display': 'flex', 'gap': '14px', 'alignItems': 'flex-start', 'flexWrap': 'wrap'})
+
+
 def subgraph_color_key(color_mode, dataset_name, num_classes):
     """Small swatch legend matching the node colours in the Cytoscape subgraph."""
     if color_mode == 'correctness':
@@ -2077,6 +2095,27 @@ def create_cpa_iv_panel(cpa_data, node_idx):
         ])
     ])
 
+def _node_attention_scores(attention_weights, layer_name, node_idx):
+    """Head-averaged attention scores on the edges touching `node_idx`
+    (the same selection _build_attention_neighbor_bar plots)."""
+    try:
+        layer_data = attention_weights.get(layer_name)
+        if not layer_data or not isinstance(layer_data, (list, tuple)) or len(layer_data) < 2:
+            return None
+        edge_arr, att_arr = np.array(layer_data[0]), np.array(layer_data[1], dtype=float)
+        if edge_arr.ndim == 2 and edge_arr.shape[0] == 2:
+            srcs, dsts = edge_arr[0], edge_arr[1]
+        elif edge_arr.ndim == 2 and edge_arr.shape[1] == 2:
+            srcs, dsts = edge_arr[:, 0], edge_arr[:, 1]
+        else:
+            return None
+        scores = att_arr.mean(axis=1) if att_arr.ndim == 2 else att_arr
+        mask = (srcs == int(node_idx)) | (dsts == int(node_idx))
+        return scores[mask]
+    except Exception:
+        return None
+
+
 def _build_attention_neighbor_bar(attention_weights, node_idx, layer_name='conv1', top_k=None):
     """Build a bar chart of 1-hop attention scores for the selected node and layer."""
     try:
@@ -2161,31 +2200,21 @@ def create_attention_panel(attention_weights, node_idx):
     if isinstance(attention_weights, dict):
         summary_items = []
         for layer_name in ('conv1', 'conv2'):
-            layer_data = attention_weights.get(layer_name)
-            if not isinstance(layer_data, (list, tuple)):
+            # Stored as (edge_index, attention): summarise the attention values only,
+            # for the selected node's edges (same rule as the bar chart below).
+            # Flattening the whole tuple mixed node ids into the average (e.g. Max 2707).
+            node_scores = _node_attention_scores(attention_weights, layer_name, node_idx)
+            if node_scores is None or node_scores.size == 0:
                 continue
-
-            flat_values = []
-
-            def flatten(value):
-                if isinstance(value, (list, tuple)):
-                    for item in value:
-                        flatten(item)
-                elif isinstance(value, (int, float)):
-                    flat_values.append(float(value))
-
-            flatten(layer_data)
-            if not flat_values:
-                continue
-
-            avg_weight = float(np.mean(flat_values))
-            max_weight = float(np.max(flat_values))
+            avg_weight = float(np.mean(node_scores))
+            max_weight = float(np.max(node_scores))
             summary_items.append(
                 html.Div([
                     html.Div(layer_name.upper(), style={'fontWeight': 'bold', 'fontSize': '12px', 'color': '#555', 'marginBottom': '4px'}),
                     html.Div([
-                        html.Span(f"Avg: {avg_weight:.4f}", style={'fontSize': '12px', 'color': '#007bff', 'fontWeight': 'bold'}),
-                        html.Span(f" | Max: {max_weight:.4f}", style={'fontSize': '12px', 'color': '#666', 'marginLeft': '8px'})
+                        html.Span(f"Avg: {avg_weight:.3f}", style={'fontSize': '12px', 'color': '#007bff', 'fontWeight': 'bold'}),
+                        html.Span(f" | Max: {max_weight:.3f}", style={'fontSize': '12px', 'color': '#666', 'marginLeft': '8px'}),
+                        html.Span(f" | {node_scores.size} edges", style={'fontSize': '11px', 'color': '#999', 'marginLeft': '8px'})
                     ])
                 ], style={'padding': '6px 0', 'borderBottom': '1px solid #eee'})
             )
@@ -2894,15 +2923,12 @@ app.layout = html.Div(style={
                                     ]),
                                 ]),
 
+                                # Full-width row; explanation_cards() sizes the CPA-IV card to the
+                                # Local Subgraph column. Flex reserves each column's padding+border
+                                # (22px x 3) before the 2:1:1 split, so that column is
+                                # 22 + (W - 28 gaps - 66) / 2 = (W - 50) / 2.
                                 html.Div(className='cpa-frame', style={
-                                    # Same width as the Local Subgraph column. Flex reserves each
-                                    # column's padding+border (22px x 3) before the 2:1:1 split, so
-                                    # that column is 22 + (W - 28 gaps - 66) / 2 = (W - 50) / 2.
-                                    'width': 'calc((100% - 50px) / 2)',
-                                    'backgroundColor': '#f8f9ff',
-                                    'border': '1px solid #dde',
-                                    'borderRadius': '6px',
-                                    'padding': '12px',
+                                    'width': '100%',
                                     'boxSizing': 'border-box',
                                     'marginTop': '16px'
                                 }, children=[
@@ -5318,12 +5344,7 @@ def update_bottom_layer(selected_link, selected_node, explanation, cpa_data, lin
                     f"{u} \u2192 {v}"
                 )
             if causal_content or attention_content:
-                explanation_children = []
-                if causal_content:
-                    explanation_children.append(html.Div(causal_content, style={'flex': '1', 'minWidth': '320px'}))
-                if attention_content:
-                    explanation_children.append(html.Div(attention_content, style={'flex': '1', 'minWidth': '320px'}))
-                causal_content = html.Div(explanation_children, style={'display': 'flex', 'flexWrap': 'wrap', 'gap': '16px', 'alignItems': 'flex-start'})
+                causal_content = explanation_cards(causal_content, attention_content)
                 causal_style = {'display': 'block', 'marginTop': '16px'}
             return graph_elements, neighbor_fig, feature_fig, legend_content, header_text, causal_content, causal_style
 
@@ -5456,8 +5477,7 @@ def update_bottom_layer(selected_link, selected_node, explanation, cpa_data, lin
                             # Not an explanation yet: label honestly as raw input values
                             feature_fig = plot_feature_importance(
                                 feat_dict, target_node_idx, top_k=10, value_label='Raw value',
-                                title=(f'Raw feature values, node {target_node_idx}'
-                                       '<br><span style="font-size:11px;color:#6b7280">Press RUN ANALYSIS for importance</span>'))
+                                title=f'Raw feature values, node {target_node_idx}')
                         else:
                             feature_fig = empty_fig
                     else:
@@ -5476,12 +5496,7 @@ def update_bottom_layer(selected_link, selected_node, explanation, cpa_data, lin
                     target_node_idx if target_node_idx != -1 else 'selected node'
                 )
             if causal_content or attention_content:
-                explanation_children = []
-                if causal_content:
-                    explanation_children.append(html.Div(causal_content, style={'flex': '1', 'minWidth': '320px'}))
-                if attention_content:
-                    explanation_children.append(html.Div(attention_content, style={'flex': '1', 'minWidth': '320px'}))
-                causal_content = html.Div(explanation_children, style={'display': 'flex', 'flexWrap': 'wrap', 'gap': '16px', 'alignItems': 'flex-start'})
+                causal_content = explanation_cards(causal_content, attention_content)
                 causal_style = {'display': 'block', 'marginTop': '16px'}
             return graph_elements, neighbor_fig, feature_fig, legend_content, header_text, causal_content, causal_style
 

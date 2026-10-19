@@ -271,7 +271,7 @@ body {
 /* Narrow screens: stack the explanation panels ---------------------- */
 @media (max-width: 1100px) {
     .explain-row { flex-wrap: wrap; }
-    .cpa-frame { width: 100% !important; }
+    .cpa-card { width: 100% !important; }
     .explain-row > div {
         flex: 1 1 100% !important;
         max-width: 100% !important;
