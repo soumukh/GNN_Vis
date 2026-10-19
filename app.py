@@ -39,6 +39,8 @@ import dash_cytoscape as cyto
 
 import plotly.express as px
 
+import plotly.io as pio
+
 import plotly.graph_objects as go
 
 import torch
@@ -155,6 +157,27 @@ DEFAULT_MODEL = 'GCN'
 AVAILABLE_DATASETS = ['Cora', 'CiteSeer']
 
 AVAILABLE_MODELS = ['GCN', 'GAT']
+
+# --- Plotly Express thread safety ---
+# Dash's dev server runs callbacks in parallel threads. Plotly Express reads
+# shared template objects, and two concurrent calls can fail with
+# "ValueError: Invalid value" (seen at page load: it blanked the embedding plot
+# AND the confusion matrix). Serialise px calls and load templates up front.
+_PX_LOCK = threading.RLock()
+
+
+def _px_locked(fn):
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        with _PX_LOCK:
+            return fn(*args, **kwargs)
+    return wrapper
+
+
+for _px_name in ('scatter', 'bar', 'line', 'histogram', 'density_heatmap', 'density_contour', 'imshow'):
+    setattr(px, _px_name, _px_locked(getattr(px, _px_name)))
+for _tpl in ('plotly', 'plotly_white'):
+    pio.templates[_tpl]  # force the lazy template load on the main thread
 
 # --- Shared visual encoding ---
 # Class names in Planetoid label-index order. Verified against per-index node
@@ -2629,7 +2652,7 @@ app.layout = html.Div(style={
                     'minWidth': '300px',
                     'minHeight': '0',
                     'height': '100%',
-                    'overflow': 'hidden',
+                    'overflow': 'auto',      # scroll when the panel is smaller than the matrix
                     'backgroundColor': '#ffffff',
                     'border': '1px solid #d0d7e3',
                     'borderRadius': '8px',
@@ -2643,7 +2666,8 @@ app.layout = html.Div(style={
                     # in the shorter panel (the matrix computes instantly anyway).
                     dcc.Graph(
                         id='confusion-matrix-plot',
-                        style={'height': '100%', 'width': '100%', 'cursor': 'pointer', 'margin': '0', 'padding': '0'},
+                        # Fixed readable size; the panel scrolls instead of clipping it
+                        style={'height': '440px', 'minWidth': '400px', 'width': '100%', 'cursor': 'pointer', 'margin': '0', 'padding': '0'},
                         config={'displayModeBar': False, 'responsive': True},
                     ),
                 ]),
@@ -4835,12 +4859,17 @@ def update_mid_layer(n_clicks, predictions_data, cpa_data, link_cpa_data, embedd
 
         embeddings_2d = get_2d_embeddings(package)
         if embeddings_2d is None:
-            embeddings_fig = go.Figure(layout={'title': "Embeddings Not Available"})
+            embeddings_fig = empty_figure("Embeddings not available")
         else:
-            embeddings_fig = plot_embeddings(np.array(embeddings_2d), preds, true_labels, selected_node_id_str, class_to_color_map, num_classes,
-                                             target_node_id=target_node_id_str, dataset_name=dataset_name,
-                                             color_mode=embedding_color_mode or 'actual',
-                                             confidences=predictions_data.get('confidences'))
+            try:
+                embeddings_fig = plot_embeddings(np.array(embeddings_2d), preds, true_labels, selected_node_id_str, class_to_color_map, num_classes,
+                                                 target_node_id=target_node_id_str, dataset_name=dataset_name,
+                                                 color_mode=embedding_color_mode or 'actual',
+                                                 confidences=predictions_data.get('confidences'))
+            except Exception:
+                # Keep going: a failed embedding plot must not blank the confusion matrix
+                traceback.print_exc()
+                embeddings_fig = empty_figure("Could not draw embeddings - change colour mode to retry")
 
         # If there are active link predictions, the subgraph evaluation
         # callback is responsible for rendering the confusion matrix. Avoid
@@ -5996,11 +6025,19 @@ def update_edge_list_from_cm(clickData, eval_data, analysis_mode, predictions_da
     print(f"[CM Click] clickData received: {clickData}")
     print(f"[CM Click] analysis_mode={analysis_mode}")
 
+    empty_paging = {'rows': [], 'columns': [], 'badge_color': '', 'footer_text': '', 'page': 0, 'page_count': 1}
     try:
         point = clickData['points'][0]
-        x_val = str(point.get('x', '') or point.get('xaxis', '') or point.get('xlabel', ''))
-        y_val = str(point.get('y', '') or point.get('yaxis', '') or point.get('ylabel', ''))
 
+        # Axis values are numeric class indices: 0 is valid, so test for None, not truthiness
+        def _first(*keys):
+            for k in keys:
+                v = point.get(k)
+                if v is not None and v != '':
+                    return str(v)
+            return ''
+        x_val = _first('x', 'xaxis', 'xlabel')
+        y_val = _first('y', 'yaxis', 'ylabel')
         if not x_val or not y_val:
             print(f"[CM Click] Point keys: {list(point.keys())}")
             return (
