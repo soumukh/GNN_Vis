@@ -292,6 +292,21 @@ _FULL_GRAPH_LAYOUT_CACHE = {}  # hash(nodes, edges) -> spring_layout positions
 MODEL_LOCK = threading.RLock()
 
 
+# Without a precomputed file, live link stability takes ~0.5-1 s per edge
+# (Cora: 5278 edges, ~45 min to 2 h). Live runs use a seeded sample (~1-2 min).
+LINK_STABILITY_LIVE_SAMPLE = 100
+
+
+def private_model(package_meta, num_features, num_classes):
+    """A fresh model instance, not the shared cached one. Long stability runs
+    use it so they need not hold MODEL_LOCK (and block every other analysis)
+    for minutes: GNNExplainer's injected masks then only touch this copy."""
+    package = get_cached_package_or_load(package_meta)
+    if not package:
+        return None
+    return instantiate_model(package, package_meta.get('model_type'), num_features, num_classes)
+
+
 def serialize_model_use(fn):
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
@@ -6443,7 +6458,7 @@ app.clientside_callback(
     """
     function(n_clicks) {
         if (!n_clicks) { return window.dash_clientside.no_update; }
-        return "⏳ Running… instant if precomputed; otherwise GNNExplainer runs on every node and this can take several minutes.";
+        return "⏳ Running… instant if precomputed; otherwise GNNExplainer runs per node (or on a 100-edge sample for links) and this can take a few minutes.";
     }
     """,
     Output('stability-status', 'children', allow_duplicate=True),
@@ -6780,7 +6795,6 @@ def _make_path_network_figure(path_nodes, all_paths, source, target):
     State('analysis-mode-store', 'data'),
     prevent_initial_call=True
 )
-@serialize_model_use
 def run_stability_callback(n_clicks, sigma, sample_size,
                             package, dataset, graph_data, predictions_data, model_type,
                             analysis_mode):
@@ -6837,7 +6851,7 @@ def run_stability_callback(n_clicks, sigma, sample_size,
             else:
                 print(f"[LINK STABILITY] Sampled run — skipping cache lookup")
 
-            model = get_cached_model(package, dataset['num_features'], dataset.get('num_classes', 2))
+            model = private_model(package, dataset['num_features'], dataset.get('num_classes', 2))
             if model is None:
                 return [], "❌ Could not load model."
 
@@ -6845,8 +6859,13 @@ def run_stability_callback(n_clicks, sigma, sample_size,
             if pyg_data is None:
                 return [], "❌ Could not construct graph data."
 
-            print(f"[LINK STABILITY] Computing from scratch (key={_cache_key})")
-            results = run_link_stability_analysis(model, pyg_data, sigma, sample_size)
+            ei = pyg_data.edge_index.cpu()
+            n_total = int(torch.unique(torch.minimum(ei[0], ei[1]) * pyg_data.num_nodes
+                                       + torch.maximum(ei[0], ei[1])).numel())
+            live_sample = sample_size or LINK_STABILITY_LIVE_SAMPLE
+            print(f"[LINK STABILITY] Computing from scratch (key={_cache_key}), "
+                  f"{min(live_sample, n_total)} of {n_total} edges")
+            results = run_link_stability_analysis(model, pyg_data, sigma, live_sample)
             print(f"[LINK STABILITY] raw results: {len(results)} entries")
 
             if not results:
@@ -6860,13 +6879,18 @@ def run_stability_callback(n_clicks, sigma, sample_size,
                 return v
             safe_results = [{k: _safe(v) for k, v in r.items()} for r in results]
 
-            # persist
-            if _use_cache:
+            n_edges = len(safe_results)
+            is_full = live_sample >= n_total
+            # persist only complete runs, so the cache always means "full graph"
+            if _use_cache and is_full:
                 save_link_stability_cache(_cache_key, safe_results)
 
-            n_edges = len(safe_results)
             avg_stab = sum(r.get('stability', 0) or 0 for r in safe_results) / max(1, n_edges)
-            status = (f"✅ FULL GRAPH ({n_edges} edges) · σ={sigma} · avg S = {avg_stab:.3f}")
+            if is_full:
+                status = f"✅ FULL GRAPH ({n_edges} edges) · σ={sigma} · avg S = {avg_stab:.3f}"
+            else:
+                status = (f"🔹 SAMPLE of {n_edges} / {n_total} edges · σ={sigma} · avg S = {avg_stab:.3f} · "
+                          f"no precomputed file; run precompute_link_stability.py for the full graph")
             return safe_results, status
 
         # Default: node stability branch
@@ -6892,7 +6916,7 @@ def run_stability_callback(n_clicks, sigma, sample_size,
         else:
             print(f"[STABILITY] Sampled run — skipping cache lookup")
 
-        model = get_cached_model(package, dataset['num_features'], dataset['num_classes'])
+        model = private_model(package, dataset['num_features'], dataset['num_classes'])
         if model is None:
             return [], "❌ Could not load model."
 
