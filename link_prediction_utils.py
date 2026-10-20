@@ -1,3 +1,4 @@
+import random
 import torch
 import numpy as np
 from torch_geometric.utils import negative_sampling, to_undirected, remove_self_loops
@@ -19,6 +20,9 @@ def create_edge_splits(data, val_ratio=0.05, test_ratio=0.15, random_state=42):
     """
     torch.manual_seed(random_state)
     np.random.seed(random_state)
+    # PyG's negative_sampling draws with Python's `random` module: without this
+    # the val/test negative pairs differed on every call (not reproducible)
+    random.seed(random_state)
     
     # Ensure edges are undirected and remove self-loops
     edge_index = remove_self_loops(data.edge_index)[0]

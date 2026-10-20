@@ -5665,6 +5665,32 @@ def evaluate_subgraph_predictions(link_pred_data, analysis_mode, package, datase
 
 
 _LINK_EVAL_CACHE = {}   # (model_type, dataset_name) -> evaluate_subgraph_predictions outputs
+_LINK_SPLIT_CACHE = {}  # dataset_name -> held-out test split used in training
+
+
+def link_test_split(dataset_name):
+    """The link-prediction train/test split used by train_models.py:
+    create_edge_splits(val_ratio=0.05, test_ratio=0.15, random_state=42) on the
+    Planetoid graph. It seeds the global torch/numpy/random RNGs, so their state
+    is saved and restored around the call."""
+    if dataset_name not in _LINK_SPLIT_CACHE:
+        from link_prediction_utils import create_edge_splits
+        full = get_cached_dataset({'name': dataset_name})
+        data = Data(x=full['x'], edge_index=full['original_edge_index'], num_nodes=full['num_nodes'])
+        import random as _random
+        torch_state, np_state, py_state = torch.get_rng_state(), np.random.get_state(), _random.getstate()
+        try:
+            split = create_edge_splits(data, val_ratio=0.05, test_ratio=0.15, random_state=42)
+        finally:
+            torch.set_rng_state(torch_state)
+            np.random.set_state(np_state)
+            _random.setstate(py_state)
+        _LINK_SPLIT_CACHE[dataset_name] = {
+            'train_edge_index': split['train_edge_index'],
+            'test_pos': split['test_pos_edges'].t().tolist(),
+            'test_neg': split['test_neg_edges'].t().tolist(),
+        }
+    return _LINK_SPLIT_CACHE[dataset_name]
 
 
 @serialize_model_use
@@ -5683,121 +5709,37 @@ def _evaluate_link_predictions(link_pred_data, analysis_mode, package, dataset, 
         if not package or not dataset or analysis_mode != 'link_prediction':
             return no_update, no_update, no_update, no_update, no_update, no_update, no_update
 
-        # Try to load subgraph model; GAT may reuse the same subgraph split as GCN
-        subgraph_model_path = f"subgraph_models/{model_type}_{dataset_name}_subgraph.pkl"
-        fallback_model_path = f"subgraph_models/GCN_{dataset_name}_subgraph.pkl"
-
+        # Evaluate on the models' OWN held-out test split. train_models.py builds
+        # it with create_edge_splits(..., random_state=42), so it is reproducible
+        # here; scoring uses the training graph (test edges removed), exactly as
+        # in training. (The old subgraph_models/ edge list came from a different
+        # split: ~80% of its "held-out" edges were training edges of the current
+        # models, and they were also left in the graph while being scored.)
         try:
-            import pickle
-            import os
-
-            if not os.path.exists(subgraph_model_path):
-                if os.path.exists(fallback_model_path):
-                    print(f"WARNING: Missing subgraph model for {model_type}. Falling back to GCN split: {fallback_model_path}")
-                    subgraph_model_path = fallback_model_path
-                else:
-                    return f"❌ Subgraph model not found: {subgraph_model_path}", go.Figure(), [cell_details_placeholder('link_prediction')], no_update, {'display': 'none'}, no_update, no_update
-
-            with open(subgraph_model_path, 'rb') as f:
-                subgraph_package = pickle.load(f)
-
-            # Get removed edges info
-
-            removed_edges = subgraph_package.get('subgraph_info', {}).get('removed_edges', [])
-
-            if not removed_edges:
-
-                return "❌ No removed edges information found", go.Figure(), [cell_details_placeholder('link_prediction')], no_update, {'display': 'none'}, no_update, no_update
-
-            # Use the actual model to compute link scores so the confusion matrix
-            # and CPA/subgraph views remain consistent with the explanation pipeline.
             import numpy as np
             from sklearn.metrics import confusion_matrix, accuracy_score, precision_score, recall_score, f1_score
-            try:
-                from cpa_iv_link_prediction import get_model_score
-            except Exception:
-                get_model_score = None
 
-            # Prepare model and data tensors (prefer real model over simulation)
             model = get_cached_model(package, dataset.get('num_features'), dataset.get('num_classes'))
-            pyg_data = prepare_torch_data(dataset, None, include_labels=False)
+            if model is None or not getattr(model, 'enable_link_prediction', False):
+                # never show simulated numbers as if they were an evaluation
+                return ("❌ This model has no link-prediction head to evaluate", go.Figure(),
+                        [cell_details_placeholder('link_prediction')], no_update, {'display': 'none'}, no_update, no_update)
 
-            tp_list = []
-            fp_list = []
-            fn_list = []
-            tn_list = []
+            split = link_test_split(dataset_name)
+            positives = [tuple(e) for e in split['test_pos']]
+            negatives = [tuple(e) for e in split['test_neg']]
+            removed_edges = positives   # held-out positives (name used below)
+            full = get_cached_dataset({'name': dataset_name})
+            with torch.no_grad():
+                _, emb = model(full['x'].to(device), split['train_edge_index'].to(device), return_embeddings=True)
+                pairs = torch.tensor(positives + negatives, dtype=torch.long).t().to(emb.device)
+                scores = torch.sigmoid(model.predict_links(emb, pairs).reshape(-1)).cpu().tolist()
 
-            # If model or get_model_score missing, fall back to simple random simulation
-            if model is None or get_model_score is None or pyg_data is None:
-                import random
-                # fallback to previous random behaviour
-                num_negatives = len(removed_edges)
-                pos_data = []
-                for edge in removed_edges:
-                    u, v = int(edge[0]), int(edge[1])
-                    is_correct = random.random() < 0.8
-                    if is_correct:
-                        score = 0.51 + (random.random() * 0.48)
-                        pred = 1
-                    else:
-                        score = 0.01 + (random.random() * 0.48)
-                        pred = 0
-                    pos_data.append({'u': u, 'v': v, 'score': score, 'pred': pred, 'true': 1})
-
-                neg_data = []
-                for _ in range(num_negatives):
-                    u_neg = random.randint(0, max(1, dataset.get('num_nodes', 1000)-1))
-                    v_neg = random.randint(0, max(1, dataset.get('num_nodes', 1000)-1))
-                    if u_neg == v_neg: v_neg = (v_neg + 1) % max(1, dataset.get('num_nodes', 1000))
-                    is_correct = random.random() < 0.7
-                    if is_correct:
-                        score = 0.01 + (random.random() * 0.48)
-                        pred = 0
-                    else:
-                        score = 0.51 + (random.random() * 0.48)
-                        pred = 1
-                    neg_data.append({'u': u_neg, 'v': v_neg, 'score': score, 'pred': pred, 'true': 0})
-            else:
-                # Positives: the removed (held-out) edges.
-                positives = [(int(e[0]), int(e[1])) for e in removed_edges]
-                # Negatives: seeded (same every run) and never a real edge: they
-                # must avoid both the held-out edges and the edges in the graph.
-                import random
-                rng = random.Random(0)
-                ei = pyg_data.edge_index.cpu().tolist()
-                real = {(min(a, b), max(a, b)) for a, b in zip(ei[0], ei[1])}
-                real |= {(min(a, b), max(a, b)) for a, b in positives}
-                nnodes = int(dataset.get('num_nodes', max(1000, len(positives) * 2)))
-                negatives, sampled = [], set()
-                while len(negatives) < len(positives):
-                    a, b = rng.randrange(nnodes), rng.randrange(nnodes)
-                    key = (min(a, b), max(a, b))
-                    if a == b or key in real or key in sampled:
-                        continue
-                    sampled.add(key)
-                    negatives.append((a, b))
-
-                # Score every pair from ONE forward pass (was one full forward
-                # pass per pair: ~2100 passes, 11-12 s).
-                with torch.no_grad():
-                    _, emb = model(pyg_data.x, pyg_data.edge_index, return_embeddings=True)
-                    pairs = torch.tensor(positives + negatives, dtype=torch.long).t().to(emb.device)
-                    if getattr(model, 'enable_link_prediction', False):
-                        raw = model.predict_links(emb, pairs).reshape(-1)
-                    else:
-                        raw = (emb[pairs[0]] * emb[pairs[1]]).sum(dim=1)
-                    scores = torch.sigmoid(raw).cpu().tolist()
-                pos_data, neg_data = [], []
-                for (u, v), score in zip(positives + negatives, scores):
-                    rec = {'u': u, 'v': v, 'score': float(score), 'pred': 1 if score > 0.5 else 0}
-                    if len(pos_data) < len(positives):
-                        rec['true'] = 1
-                        pos_data.append(rec)
-                    else:
-                        rec['true'] = 0
-                        neg_data.append(rec)
-
-            # Combine all data for metrics
+            pos_data, neg_data = [], []
+            for i, ((u, v), score) in enumerate(zip(positives + negatives, scores)):
+                rec = {'u': u, 'v': v, 'score': float(score), 'pred': 1 if score > 0.5 else 0,
+                       'true': 1 if i < len(positives) else 0}
+                (pos_data if i < len(positives) else neg_data).append(rec)
 
             all_data = pos_data + neg_data
 
@@ -5936,7 +5878,7 @@ def _evaluate_link_predictions(link_pred_data, analysis_mode, package, dataset, 
             ))
 
             fig.update_layout(
-                title="Edge Prediction Confusion Matrix (Removed Edges)",
+                title="Link prediction: held-out test edges",
                 xaxis_title="Predicted",
                 yaxis_title="Actual",
                 font=dict(size=11),
@@ -5961,7 +5903,7 @@ def _evaluate_link_predictions(link_pred_data, analysis_mode, package, dataset, 
                 ("F1", float(f1), "Harmonic mean of precision and recall"),
             ])
 
-            status_msg = f"✅ Evaluated {len(removed_edges)} removed edges"
+            status_msg = f"✅ Evaluated {len(removed_edges)} held-out test edges"
 
             perf_style = {'display': 'flex'}
 
