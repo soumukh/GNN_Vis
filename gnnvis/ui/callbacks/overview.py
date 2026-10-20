@@ -10,6 +10,7 @@ from gnnvis.ui.figures.confusion import _render_cm_detail_page, node_confusion_f
 from gnnvis.ui.figures.embeddings import get_2d_embeddings, plot_embeddings
 from gnnvis.ui.theme import CORRECT_COLOR, INCORRECT_COLOR, class_color_map, class_label, empty_figure
 from gnnvis.ui import ids
+from gnnvis.tasks import get_task
 
 
 @callback(
@@ -73,7 +74,7 @@ def update_mid_layer(n_clicks, predictions_data, cpa_data, link_cpa_data, embedd
 
         selected_node_id_str = selected_node['id'] if selected_node else None
         target_node_id_str = None
-        if analysis_mode == 'link_prediction' and selected_link and isinstance(selected_link, dict):
+        if get_task(analysis_mode).is_link and selected_link and isinstance(selected_link, dict):
             target = selected_link.get('target')
             if target is not None:
                 target_node_id_str = str(target)
@@ -100,7 +101,7 @@ def update_mid_layer(n_clicks, predictions_data, cpa_data, link_cpa_data, embedd
         # subgraph/link-evaluation callback. Avoid overwriting that figure
         # by returning `no_update` for the CM output so other callbacks can
         # set it (prevents brief flash + overwrite behavior).
-        if analysis_mode == 'link_prediction':
+        if get_task(analysis_mode).is_link:
             return embeddings_fig, no_update, gnn_style
 
         cm_fig = node_confusion_figure(true_labels, preds, num_classes, dataset_name)
@@ -130,7 +131,7 @@ def update_mid_layer(n_clicks, predictions_data, cpa_data, link_cpa_data, embedd
 def update_node_performance_metrics(run_clicks, predictions_data, analysis_mode, dataset_meta):
     try:
         # Node-classification metrics, shown as soon as predictions exist
-        if analysis_mode != 'node_classification':
+        if get_task(analysis_mode).is_link:
             return no_update, no_update
 
         if not predictions_data or not dataset_meta:
@@ -238,7 +239,7 @@ def update_edge_list_from_cm(clickData, eval_data, analysis_mode, predictions_da
         PANEL_TITLE = 'Confusion Matrix Details'
 
         # Ensure node-classification uses the full cached dataset so y labels are available.
-        if analysis_mode == 'node_classification' and dataset and isinstance(dataset, dict) and 'name' in dataset:
+        if not get_task(analysis_mode).is_link and dataset and isinstance(dataset, dict) and 'name' in dataset:
             dataset = get_cached_dataset_if_missing(dataset)
 
         def _badge_div(label, count, unit, badge_color, description):
@@ -264,7 +265,7 @@ def update_edge_list_from_cm(clickData, eval_data, analysis_mode, predictions_da
         }
 
         # ─── NODE CLASSIFICATION ─────────────────────────────────────────
-        if analysis_mode == 'node_classification':
+        if not get_task(analysis_mode).is_link:
             print(f"[CM Click] Entering node_classification branch")
             if not predictions_data or not dataset:
                 return (

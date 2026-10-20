@@ -8,9 +8,10 @@ import pickle
 import pandas as pd
 import numpy as np
 import torch
-from torch_geometric.data import Data
 
-from torch_geometric.explain import Explainer, GNNExplainer
+from gnnvis.explainers.gnnexplainer import (
+    STABILITY_EPOCHS, LinkLogit, edge_mask, link_mask_explainer, model_device, node_mask_explainer,
+)
 
 STABILITY_CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'stability_cache')
 os.makedirs(STABILITY_CACHE_DIR, exist_ok=True)
@@ -137,38 +138,13 @@ def _scan_link_stability_cache() -> None:
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-# Edge mask extraction helper
-
-def _get_edge_mask(explanation):
-    mask = getattr(explanation, 'edge_mask', None)
-    if mask is not None:
-        return mask.detach().cpu().numpy()
-    mask = explanation.get('edge_mask', None)
-    if mask is not None:
-        return mask.detach().cpu().numpy()
-    for key in explanation.keys() if hasattr(explanation, 'keys') else []:
-        if 'edge' in key.lower() and 'mask' in key.lower():
-            val = explanation[key]
-            if val is not None:
-                print(f"[STABILITY] Found edge mask under key '{key}'")
-                return val.detach().cpu().numpy()
-    try:
-        avail = list(explanation.keys()) if hasattr(explanation, 'keys') else dir(explanation)
-        print(f"[STABILITY] WARNING — edge_mask not found. Available keys: {avail}")
-    except Exception:
-        pass
-    return None
+# Shared with the app's explanations (gnnvis/explainers/gnnexplainer.py)
+_get_edge_mask = edge_mask
+_model_device = model_device
+_LinkPredWrapper = LinkLogit
 
 
 # Node-level explainer stability
-
-def _model_device(model):
-    """Device the model's parameters live on (falls back to CPU)."""
-    try:
-        return next(model.parameters()).device
-    except StopIteration:
-        return torch.device('cpu')
-
 
 def run_stability_analysis(model, data, predictions_data, sigma, sample_size, seed=42, progress_every=0):
     """Node-level GNNExplainer top-k Jaccard stability.
@@ -207,13 +183,7 @@ def run_stability_analysis(model, data, predictions_data, sigma, sample_size, se
         sample_nodes = rng.choice(data.num_nodes, size=int(sample_size), replace=False)
     n_sample = len(sample_nodes)
 
-    explainer = Explainer(
-        model=model,
-        algorithm=GNNExplainer(epochs=20),
-        explanation_type='model',
-        edge_mask_type='object',
-        model_config=dict(mode='multiclass_classification', task_level='node', return_type='log_probs')
-    )
+    explainer = node_mask_explainer(model, epochs=STABILITY_EPOCHS)
 
     results = []
     skip_reasons = {}
@@ -377,27 +347,7 @@ def run_prediction_consistency_stability(model, data, predictions_data, sigma,
     return results
 
 
-# Link wrapper and per-edge stability (moved from app.py)
-class _LinkPredWrapper(torch.nn.Module):
-    """Wraps the base GNN so GNNExplainer can explain a single link (src→dst).
-    forward(x, edge_index) → raw logit [1,1] for a binary_classification task
-    with return_type='raw'. (Returning a sigmoid here would make PyG treat every
-    edge as class 1 and apply sigmoid twice in the loss.)"""
-    def __init__(self, base_model, src: int, dst: int):
-        super().__init__()
-        self.base_model = base_model
-        self.src = int(src)
-        self.dst = int(dst)
-
-    def forward(self, x, edge_index, **kwargs):
-        _, emb = self.base_model(x, edge_index, return_embeddings=True)
-        ep = torch.tensor([[self.src], [self.dst]], device=x.device, dtype=torch.long)
-        if getattr(self.base_model, 'enable_link_prediction', False):
-            score = self.base_model.predict_links(emb, ep)
-        else:
-            score = (emb[self.src] * emb[self.dst]).sum()
-        return score.view(1, 1)
-
+# Per-edge stability
 
 def run_link_stability_analysis(model, data, sigma: float, sample_size: int, seed=42, progress_every=25):
     """
@@ -471,15 +421,7 @@ def run_link_stability_analysis(model, data, sigma: float, sample_size: int, see
             cn = len(adj[u].intersection(adj[v]))
 
             # Build per-edge GNNExplainer
-            wrapper = _LinkPredWrapper(model, u, v)
-            wrapper.eval()
-            link_explainer = Explainer(
-                model=wrapper,
-                algorithm=GNNExplainer(epochs=20),
-                explanation_type='model',
-                edge_mask_type='object',
-                model_config=dict(mode='binary_classification', task_level='graph', return_type='raw')
-            )
+            link_explainer = link_mask_explainer(model, u, v, epochs=STABILITY_EPOCHS)
 
             exp_orig = link_explainer(x=x, edge_index=edge_index)
             mask_orig = _get_edge_mask(exp_orig)

@@ -10,6 +10,7 @@ from gnnvis.runtime import device, get_cached_dataset, get_cached_dataset_if_mis
 from gnnvis.ui.components import cell_details_placeholder, metric_tiles
 from gnnvis.ui.figures.confusion import link_confusion_figure
 from gnnvis.ui import ids
+from gnnvis.tasks import LINK_PREDICTION, get_task
 
 
 @callback(
@@ -104,7 +105,7 @@ def run_link_prediction_unified(predict_clicks, global_clicks,
 
         if triggered_id == ids.GLOBAL_RUN_BUTTON:
 
-            if analysis_mode != 'link_prediction':
+            if not get_task(analysis_mode).is_link:
 
                 return no_update, no_update, no_update, no_update
 
@@ -168,7 +169,7 @@ def run_link_prediction_unified(predict_clicks, global_clicks,
             # fallback to node 0 and continue so the UI shows the Link CM instead
             # of silently doing nothing.
             try:
-                if analysis_mode == 'link_prediction':
+                if get_task(analysis_mode).is_link:
                     node_idx = 0
                     print("[LINK-PRED] No source provided on Run — defaulting to node 0")
                 else:
@@ -265,7 +266,7 @@ def evaluate_subgraph_predictions(link_pred_data, analysis_mode, package, datase
     when Link view is entered or the model changes, and cached per
     (model, dataset): RUN and link selections reuse it instantly instead of
     waiting behind other model work."""
-    if not package or not dataset or analysis_mode != 'link_prediction':
+    if not package or not dataset or not get_task(analysis_mode).is_link:
         return no_update, no_update, no_update, no_update, no_update, no_update, no_update
     key = (model_type, dataset_name)
     result = _LINK_EVAL_CACHE.get(key)
@@ -293,7 +294,7 @@ def _evaluate_link_predictions(link_pred_data, analysis_mode, package, dataset, 
         except Exception:
             pass
 
-        if not package or not dataset or analysis_mode != 'link_prediction':
+        if not package or not dataset or not get_task(analysis_mode).is_link:
             return no_update, no_update, no_update, no_update, no_update, no_update, no_update
 
         # Evaluate on the models' OWN held-out test split. train_models.py builds
@@ -309,7 +310,7 @@ def _evaluate_link_predictions(link_pred_data, analysis_mode, package, dataset, 
             if model is None or not getattr(model, 'enable_link_prediction', False):
                 # never show simulated numbers as if they were an evaluation
                 return ("❌ This model has no link-prediction head to evaluate", go.Figure(),
-                        [cell_details_placeholder('link_prediction')], no_update, {'display': 'none'}, no_update, no_update)
+                        [cell_details_placeholder(LINK_PREDICTION)], no_update, {'display': 'none'}, no_update, no_update)
 
             split = link_test_split(dataset_name)
             positives = [tuple(e) for e in split['test_pos']]

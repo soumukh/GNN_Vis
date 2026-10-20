@@ -3,6 +3,7 @@
 import dash.dependencies
 from dash import ALL, Input, Output, State, callback, ctx, no_update
 from gnnvis.ui import ids
+from gnnvis.tasks import get_task
 
 
 @callback(
@@ -156,7 +157,7 @@ def update_selected_link_master(run_clicks, item_clicks, lp_input_values, lp_inp
         # Link mode: a typed source + target pair becomes the selected link, which
         # opens its subgraph, explanation and CPA-IV (invalid pairs are reported
         # by run_link_prediction_unified via link-status-store).
-        if analysis_mode == 'link_prediction' and lp_input_values and lp_input_ids:
+        if get_task(analysis_mode).is_link and lp_input_values and lp_input_ids:
             vals = {i.get('index'): v for v, i in zip(lp_input_values, lp_input_ids)}
             try:
                 u, v = int(vals.get('source-active')), int(vals.get('target-active'))

@@ -4,6 +4,7 @@ from dash import html, dcc
 
 from gnnvis.config import AVAILABLE_DATASETS, DEFAULT_DATASET, DEFAULT_MODEL, AVAILABLE_MODELS
 from gnnvis.ui import ids
+from gnnvis.tasks import DEFAULT_TASK, TASKS
 
 
 def controls():
@@ -50,11 +51,8 @@ def controls():
                     ),
                     dcc.RadioItems(
                         id=ids.ANALYSIS_MODE_SWITCH,
-                        options=[
-                            {'label': ' Node', 'value': 'node_classification'},
-                            {'label': ' Link', 'value': 'link_prediction'}
-                        ],
-                        value='node_classification',
+                        options=[{'label': t.switch_label, 'value': t.key} for t in TASKS.values()],
+                        value=DEFAULT_TASK,
                         inline=True,
                         labelStyle={'marginRight': '10px'}
                     )

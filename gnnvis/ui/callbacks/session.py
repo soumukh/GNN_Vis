@@ -7,6 +7,7 @@ from app_expl import run_inference
 
 from gnnvis.runtime import get_cached_dataset_if_missing, get_cached_model, get_cached_package_if_missing, package_meta_from_selection, prepare_torch_data, serialize_model_use
 from gnnvis.ui import ids
+from gnnvis.tasks import NODE_CLASSIFICATION, get_task
 
 
 @callback(
@@ -22,31 +23,30 @@ from gnnvis.ui import ids
 )
 def update_status_bar(dataset_name, model_type, analysis_mode, predictions_data, selected_node, selected_link, explanation, link_status):
     """Breadcrumb of the current context plus the next step to take."""
-    task = 'Link prediction' if analysis_mode == 'link_prediction' else 'Node classification'
-    chips = [html.Span(f"{dataset_name} · {model_type} · {task}", className='chip chip-context')]
+    task = get_task(analysis_mode)
+    chips = [html.Span(f"{dataset_name} · {model_type} · {task.label}", className='chip chip-context')]
 
     if not predictions_data:
         chips.append(html.Span("Loading model…", className='chip chip-busy'))
         return chips
 
-    if analysis_mode == 'link_prediction':
+    if task.is_link:
         if isinstance(link_status, dict) and link_status.get('type') == 'error':
             chips.append(html.Span(link_status.get('text', 'Error'), className='chip chip-error'))
         if selected_link:
             chips.append(html.Span(f"Link {selected_link.get('source')} → {selected_link.get('target')}", className='chip'))
             step = "Inspect the causal paths and subgraph below."
         else:
-            step = ("Enter source and target node IDs and press RUN ANALYSIS, or click a "
-                    "confusion-matrix cell and then a link in its list.")
+            step = task.idle_hint
     else:
         node_id = (selected_node or {}).get('id')
-        explained = (isinstance(explanation, dict) and explanation.get('explanation_type') == 'node_classification'
+        explained = (isinstance(explanation, dict) and explanation.get('explanation_type') == NODE_CLASSIFICATION
                      and not explanation.get('error')
                      and str(explanation.get('node_idx')) == str(node_id))
         if explanation and isinstance(explanation, dict) and explanation.get('error'):
             chips.append(html.Span(explanation['error'], className='chip chip-error'))
         if node_id is None:
-            step = "Click a node in the embedding plot or full graph, or type an ID under Selection."
+            step = task.idle_hint
         else:
             chips.append(html.Span(f"Node {node_id}", className='chip'))
             step = ("Explanation ready: see the Explanation tab." if explained
@@ -64,9 +64,10 @@ def update_status_bar(dataset_name, model_type, analysis_mode, predictions_data,
 )
 def update_analysis_mode(mode):
     """Layer 1 only controls task mode. All explanation logic lives in Layer 3 tabs."""
-    graph_type = 'full' if mode == 'node_classification' else 'sub'
+    task = get_task(mode)
+    graph_type = task.graph_type
 
-    if mode == 'link_prediction':
+    if task.is_link:
         # Source + Target for link prediction (used by LP inference + Causal analysis)
         selection_interface = html.Div(style={'padding': '5px 0', 'width': '100%'}, children=[
             html.Div(style={'display': 'flex', 'gap': '10px', 'marginBottom': '5px'}, children=[
@@ -120,7 +121,7 @@ def toggle_node_classification_section(mode):
 
     """Show/hide node classification section based on analysis mode."""
 
-    if mode == 'link_prediction':
+    if get_task(mode).is_link:
 
         # Hide the section in link prediction mode
 

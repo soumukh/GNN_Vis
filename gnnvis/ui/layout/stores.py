@@ -2,6 +2,7 @@
 
 from dash import html, dcc
 from gnnvis.ui import ids
+from gnnvis.tasks import DEFAULT_TASK
 
 
 def stores():
@@ -30,7 +31,7 @@ def stores():
 
         dcc.Store(id=ids.SELECTED_LINK_STORE),
 
-        dcc.Store(id=ids.ANALYSIS_MODE_STORE, data='node_classification'),
+        dcc.Store(id=ids.ANALYSIS_MODE_STORE, data=DEFAULT_TASK),
 
         dcc.Store(id=ids.GRAPH_TYPE_STORE, data='full'),
 

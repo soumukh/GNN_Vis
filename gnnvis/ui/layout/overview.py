@@ -4,6 +4,7 @@ from dash import html, dcc
 
 from gnnvis.ui.components import cell_details_placeholder, confusion_matrix_style
 from gnnvis.ui import ids
+from gnnvis.tasks import DEFAULT_TASK
 
 
 def overview():
@@ -91,7 +92,7 @@ def overview():
                             # Fills the panel; the minimum height (per view, see
                             # confusion_matrix_style) makes the panel scroll only when
                             # the matrix would otherwise be squeezed
-                            style=confusion_matrix_style('node_classification'),
+                            style=confusion_matrix_style(DEFAULT_TASK),
                             config={'displayModeBar': False, 'responsive': True},
                         ),
                     ]),

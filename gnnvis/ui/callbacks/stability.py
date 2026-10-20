@@ -12,6 +12,7 @@ from gnnvis.runtime import LINK_STABILITY_LIVE_SAMPLE, prepare_torch_data, priva
 from gnnvis.ui.components import stability_unsupported_message
 from gnnvis.ui.figures.stability import build_drilldown_scatter, build_region_highlight, build_stability_plots
 from gnnvis.ui import ids
+from gnnvis.tasks import get_task
 
 
 @callback(
@@ -93,8 +94,7 @@ def run_stability_callback(n_clicks, sigma, sample_size,
             print("[STABILITY] Graph has been edited — bypassing stability cache")
 
         # If analysis mode indicates link prediction, run link-stability branch
-        mode = (analysis_mode or '').lower()
-        if 'link' in mode or 'link_prediction' in mode:
+        if get_task(analysis_mode).is_link:
             _cache_key = get_link_stability_cache_key(dataset_name, model_type or 'gcn', sigma)
             if _use_cache:
                 _cached = load_link_stability_cache(_cache_key)

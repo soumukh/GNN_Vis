@@ -4,6 +4,7 @@ from dash import html
 from gnnvis.models import available_models
 from gnnvis.models import model_capabilities
 from gnnvis.ui.theme import CORRECT_COLOR, INCORRECT_COLOR, class_color_map, class_name
+from gnnvis.tasks import DEFAULT_TASK, get_task
 
 
 def stability_unsupported_message(model_type):
@@ -45,16 +46,13 @@ def confusion_matrix_style(analysis_mode):
     """Graph style for the confusion matrix: fill the panel, but never shrink
     below a readable size (7x7 node matrix needs more room than 2x2 links).
     The panel has overflow:auto, so a scroll bar appears only if it is shorter."""
-    min_h = '240px' if analysis_mode == 'link_prediction' else '380px'
-    return {'height': '100%', 'minHeight': min_h, 'minWidth': '300px', 'width': '100%',
+    return {'height': '100%', 'minHeight': get_task(analysis_mode).confusion_min_height, 'minWidth': '300px', 'width': '100%',
             'cursor': 'pointer', 'margin': '0', 'padding': '0'}
 
 
-def cell_details_placeholder(analysis_mode='node_classification'):
+def cell_details_placeholder(analysis_mode=DEFAULT_TASK):
     """Cell-details panel before any confusion-matrix cell is clicked."""
-    what = ("its edges (TP / FP / FN / TN); click a row to inspect that link"
-            if analysis_mode == 'link_prediction'
-            else "the nodes in it; click a row to select that node")
+    what = get_task(analysis_mode).cell_details_hint
     return html.Div([
         html.Div("Cell details", className='legend-title'),
         html.Div(f"Click a cell of the confusion matrix to list {what}.", className='empty-hint'),

@@ -3,9 +3,10 @@
 import torch
 from torch_geometric.utils import k_hop_subgraph
 from gnnvis.ui.theme import CORRECT_COLOR, INCORRECT_COLOR
+from gnnvis.tasks import LINK_PREDICTION, NODE_CLASSIFICATION, get_task
 
 
-def create_subgraph_cytoscape(data, center_node_idx, predictions, class_to_color_map, explanation, cpa_data, link_predictions=None, analysis_mode='node_classification', selected_path_idx=None, color_mode='predicted', true_labels=None):
+def create_subgraph_cytoscape(data, center_node_idx, predictions, class_to_color_map, explanation, cpa_data, link_predictions=None, analysis_mode=NODE_CLASSIFICATION, selected_path_idx=None, color_mode='predicted', true_labels=None):
 
     # STRICT ENGINEERING PATCH: Ensure Link Subgraph strictly reflects selected link (u, v)
 
@@ -15,11 +16,11 @@ def create_subgraph_cytoscape(data, center_node_idx, predictions, class_to_color
 
     # 1. Determine Subgraph Nodes (Strict Isolation for Link Prediction)
 
-    if analysis_mode == 'link_prediction':
+    if get_task(analysis_mode).is_link:
 
         # Case A: Explanation-driven (if explanation matches selected link)
 
-        if explanation and explanation.get('explanation_type') == 'link_prediction':
+        if explanation and explanation.get('explanation_type') == LINK_PREDICTION:
 
             nodes_in_subgraph = set(explanation['subgraph_nodes'])
 
@@ -235,11 +236,11 @@ def create_subgraph_cytoscape(data, center_node_idx, predictions, class_to_color
 
         # Highlight center node or link nodes
 
-        if analysis_mode == 'link_prediction':
+        if get_task(analysis_mode).is_link:
 
              # Case A: Explanation driven
 
-            if explanation and explanation.get('explanation_type') == 'link_prediction':
+            if explanation and explanation.get('explanation_type') == LINK_PREDICTION:
 
                  if node_id == explanation['source_node'] or node_id == explanation['target_node']:
 

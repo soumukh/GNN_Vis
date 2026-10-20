@@ -28,6 +28,11 @@ Quick check after the offline phase: `python test_smoke.py`
 - `gnnvis/ui/layout/`: the page layout, one module per area (header, controls, overview,
   explanation / full-graph / stability tabs, stores); `build_layout()` assembles it.
 - `gnnvis/config.py`: datasets, defaults and the model list (from the registry).
+- `gnnvis/tasks.py`: the two tasks (node classification, link prediction) and what differs
+  between them; callbacks use `get_task(mode)` instead of comparing mode strings.
+- `gnnvis/explainers/`: explainers registered per task and kind (`attribution`:
+  GNNExplainer for nodes, a structural heuristic for links; `causal_paths`: CPA-IV).
+  The app and both stability analyses build their GNNExplainer here.
 - `gnnvis/ui/callbacks/`: the Dash callbacks, one module per feature (session, selection,
   explanation, overview, link, full graph, stability); importing the package registers them.
 - `gnnvis/runtime.py`: device, paths, caches of model packages / datasets / models, locks.
@@ -47,6 +52,16 @@ Quick check after the offline phase: `python test_smoke.py`
 
 The app's model dropdown, the attention panel and the stability tab follow the
 registry and the model's capabilities; no other code needs to know its name.
+
+### Adding an explainer
+Write `fn(model, data, target, **options)` (`target` is a node index, or a
+`(source, target)` pair for links) returning the same kind of result as the built-in
+one, and register it in a module imported by `gnnvis/explainers/__init__.py`:
+
+    @register_explainer('MyExplainer', NODE_CLASSIFICATION, ATTRIBUTION, default=True)
+    def my_explainer(model, data, node_idx, predicted_class=None): ...
+
+With `default=True` the app uses it instead of the built-in one.
 
 
 For better performance GPU should be utilized
