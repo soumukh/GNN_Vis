@@ -1,8 +1,9 @@
 # Data, trained models and caches (large / regenerable — see README "Offline Phase")
-data/
-models/
-subgraph_models/
-stability_cache/
+# (leading "/" = project root only; gnnvis/models/ is source code and is tracked)
+/data/
+/models/
+/subgraph_models/
+/stability_cache/
 
 # Generated outputs and logs
 *.log
