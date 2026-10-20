@@ -34,7 +34,7 @@ def run_stability_analysis(model, data, predictions_data, sigma, sample_size, se
     """Node-level GNNExplainer top-k Jaccard stability.
 
     This is the single implementation used by both the app and
-    precompute_stability.py, so cached and live results are comparable.
+    precompute_node_stability.py, so cached and live results are comparable.
     Lipschitz = ||mask_orig - mask_pert|| / ||noise||, with the noise norm taken
     over the whole feature matrix (noise is applied to every node).
     """

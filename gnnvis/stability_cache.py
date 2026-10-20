@@ -163,11 +163,11 @@ def link_results_match(model, data, results, atol=1e-4):
 def scan():
     """Startup summary of the files in stability_cache/."""
     if not os.path.isdir(CACHE_DIR):
-        print("[STABILITY CACHE] No stability_cache/ folder; run precompute_stability.py")
+        print("[STABILITY CACHE] No stability_cache/ folder; run precompute_node_stability.py")
         return
     files = sorted(f for f in os.listdir(CACHE_DIR) if f.startswith('stability_') and f.endswith(('.pkl', '.parquet')))
     if not files:
-        print("[STABILITY CACHE] No precomputed files; run precompute_stability.py / precompute_link_stability.py")
+        print("[STABILITY CACHE] No precomputed files; run precompute_node_stability.py / precompute_link_stability.py")
         return
     print(f"[STABILITY CACHE] {len(files)} precomputed file(s):")
     for fname in files:

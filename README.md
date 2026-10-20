@@ -6,7 +6,7 @@ Paper published in 29th International Conference Information Visualisation 2025 
 To start first run the following codes:
 1. preprocess_dataset.py
 2. train_models.py
-3. precompute_stability.py 
+3. precompute_node_stability.py 
 4. precompute_link_stability.py
 
 ## Online Phase
@@ -48,7 +48,7 @@ Quick check after the offline phase: `python test_smoke.py`
   and `tests/test_ids.py` fails if a callback references a component that never exists.
 - `app.py`: the entry point (creates the app, attaches the layout, registers callbacks); `app_stability.py`, `app_expl.py`,
   `cpa_iv_link_prediction.py`, `link_prediction_utils.py`: analysis code.
-- `train_models.py`, `precompute_stability.py`, `precompute_link_stability.py`: offline scripts.
+- `train_models.py`, `precompute_node_stability.py`, `precompute_link_stability.py`: offline scripts.
 - `tests/`: `python -m pytest` (a few seconds; synthetic graphs, plus checks on the saved
   models when they are present).
 
@@ -62,7 +62,7 @@ The app's model dropdown, the attention panel and the stability tab follow the
 registry and the model's capabilities; no other code needs to know its name.
 
 ### Stability caches after retraining
-After retraining a model, run `python precompute_stability.py` (and
+After retraining a model, run `python precompute_node_stability.py` (and
 `python precompute_link_stability.py` for link stability). They recompute only the
 files that are missing or out of date for the current models; `--force` recomputes all.
 

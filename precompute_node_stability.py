@@ -1,11 +1,11 @@
 """
-precompute_stability.py
+precompute_node_stability.py
 Run stability analysis for every dataset/model/sigma combination and save
 to the stability_cache/ folder so the Dash app never has to recompute.
 
 Usage:
-    python precompute_stability.py
-    python precompute_stability.py --datasets Cora --models GCN --sigmas 0.05
+    python precompute_node_stability.py
+    python precompute_node_stability.py --datasets Cora --models GCN --sigmas 0.05
 """
 
 import argparse
