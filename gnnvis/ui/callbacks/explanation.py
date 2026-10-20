@@ -21,27 +21,28 @@ from gnnvis.ui.figures.cpa import create_cpa_iv_panel
 from gnnvis.ui.figures.importance import compute_neighbor_importance_from_pyg, get_one_hop_neighbors, plot_feature_importance, plot_neighbor_importance
 from gnnvis.ui.figures.subgraph import create_subgraph_cytoscape
 from gnnvis.ui.theme import CORRECT_COLOR, INCORRECT_COLOR, class_color_map, class_name, empty_figure
+from gnnvis.ui import ids
 
 
 @callback(
 
-    Output('explanation-store', 'data', allow_duplicate=True),
+    Output(ids.EXPLANATION_STORE, 'data', allow_duplicate=True),
 
-    Output('link-prediction-store', 'data', allow_duplicate=True),
+    Output(ids.LINK_PREDICTION_STORE, 'data', allow_duplicate=True),
 
-    Input('selected-link-store', 'data'),
+    Input(ids.SELECTED_LINK_STORE, 'data'),
 
-    State('global-run-button', 'n_clicks'),
+    State(ids.GLOBAL_RUN_BUTTON, 'n_clicks'),
 
-    State('editable-graph-store', 'data'),
+    State(ids.EDITABLE_GRAPH_STORE, 'data'),
 
-    State('precomputed-package-store', 'data'), 
+    State(ids.PRECOMPUTED_PACKAGE_STORE, 'data'), 
 
-    State('full-dataset-store', 'data'),
+    State(ids.FULL_DATASET_STORE, 'data'),
 
-    State('model-dropdown', 'value'),
+    State(ids.MODEL_DROPDOWN, 'value'),
 
-    State('analysis-mode-store', 'data'),
+    State(ids.ANALYSIS_MODE_STORE, 'data'),
 
     prevent_initial_call=True
 
@@ -114,29 +115,29 @@ def generate_link_explanation_on_select(selected_link, run_clicks, graph_data, p
 
 @callback(
 
-    Output('explanation-store', 'data', allow_duplicate=True),
+    Output(ids.EXPLANATION_STORE, 'data', allow_duplicate=True),
 
-    Output('global-run-button', 'children', allow_duplicate=True),
+    Output(ids.GLOBAL_RUN_BUTTON, 'children', allow_duplicate=True),
 
-    Output('global-run-button', 'disabled', allow_duplicate=True),
+    Output(ids.GLOBAL_RUN_BUTTON, 'disabled', allow_duplicate=True),
 
-    Input('global-run-button', 'n_clicks'),
+    Input(ids.GLOBAL_RUN_BUTTON, 'n_clicks'),
 
-    State('selected-node-store', 'data'),
+    State(ids.SELECTED_NODE_STORE, 'data'),
 
-    State('selected-link-store', 'data'),
+    State(ids.SELECTED_LINK_STORE, 'data'),
 
-    State({'type': 'lp-input', 'index': ALL}, 'value'), # Capture manual link inputs
+    State({'type': ids.LP_INPUT_TYPE, 'index': ALL}, 'value'), # Capture manual link inputs
 
-    State('editable-graph-store', 'data'),
+    State(ids.EDITABLE_GRAPH_STORE, 'data'),
 
-    State('precomputed-package-store', 'data'), State('full-dataset-store', 'data'),
+    State(ids.PRECOMPUTED_PACKAGE_STORE, 'data'), State(ids.FULL_DATASET_STORE, 'data'),
 
-    State('current-predictions-store', 'data'), State('model-dropdown', 'value'),
+    State(ids.CURRENT_PREDICTIONS_STORE, 'data'), State(ids.MODEL_DROPDOWN, 'value'),
 
-    State('analysis-mode-store', 'data'),
+    State(ids.ANALYSIS_MODE_STORE, 'data'),
 
-    State('layer3-tabs', 'value'),
+    State(ids.LAYER3_TABS, 'value'),
 
     prevent_initial_call=True
 
@@ -275,21 +276,21 @@ def run_explainer(n_clicks, selected_node, selected_link, lp_inputs, graph_data,
 
 @callback(
 
-    Output('cpa-iv-store', 'data'),
+    Output(ids.CPA_IV_STORE, 'data'),
 
-    Output('cpa-status-store', 'data'),
+    Output(ids.CPA_STATUS_STORE, 'data'),
 
-    Input('run-cpa-iv-button', 'n_clicks'),
+    Input(ids.RUN_CPA_IV_BUTTON, 'n_clicks'),
 
-    State('selected-node-store', 'data'),
+    State(ids.SELECTED_NODE_STORE, 'data'),
 
-    State('precomputed-package-store', 'data'),
+    State(ids.PRECOMPUTED_PACKAGE_STORE, 'data'),
 
-    State('full-dataset-store', 'data'),
+    State(ids.FULL_DATASET_STORE, 'data'),
 
-    State('editable-graph-store', 'data'),
+    State(ids.EDITABLE_GRAPH_STORE, 'data'),
 
-    State('model-dropdown', 'value'),
+    State(ids.MODEL_DROPDOWN, 'value'),
 
     prevent_initial_call=True
 
@@ -332,24 +333,24 @@ def run_cpa_iv_callback(n_clicks, selected_node, package_meta, dataset_meta, gra
 
 
 @callback(
-    Output('cpa-iv-store', 'data', allow_duplicate=True),
-    Output('link-cpa-iv-store', 'data', allow_duplicate=True),
-    Output('cpa-status-store', 'data', allow_duplicate=True),
-    Input('global-run-button', 'n_clicks'),
-    Input('run-cpa-iv-button', 'n_clicks'),
-    Input('selected-link-store', 'data'),
-    Input('selected-node-store', 'data'),
-    State('selected-link-store', 'data'),
-    State('precomputed-package-store', 'data'),
-    State('full-dataset-store', 'data'),
-    State('editable-graph-store', 'data'),
-    State('model-dropdown', 'value'),
-    State('analysis-mode-store', 'data'),
-    State('layer3-tabs', 'value'),
-    State({'type': 'lp-input', 'index': ALL}, 'value'),
-    State({'type': 'lp-input', 'index': ALL}, 'id'),
-    State('link-source-input', 'value'),
-    State('link-target-input', 'value'),
+    Output(ids.CPA_IV_STORE, 'data', allow_duplicate=True),
+    Output(ids.LINK_CPA_IV_STORE, 'data', allow_duplicate=True),
+    Output(ids.CPA_STATUS_STORE, 'data', allow_duplicate=True),
+    Input(ids.GLOBAL_RUN_BUTTON, 'n_clicks'),
+    Input(ids.RUN_CPA_IV_BUTTON, 'n_clicks'),
+    Input(ids.SELECTED_LINK_STORE, 'data'),
+    Input(ids.SELECTED_NODE_STORE, 'data'),
+    State(ids.SELECTED_LINK_STORE, 'data'),
+    State(ids.PRECOMPUTED_PACKAGE_STORE, 'data'),
+    State(ids.FULL_DATASET_STORE, 'data'),
+    State(ids.EDITABLE_GRAPH_STORE, 'data'),
+    State(ids.MODEL_DROPDOWN, 'value'),
+    State(ids.ANALYSIS_MODE_STORE, 'data'),
+    State(ids.LAYER3_TABS, 'value'),
+    State({'type': ids.LP_INPUT_TYPE, 'index': ALL}, 'value'),
+    State({'type': ids.LP_INPUT_TYPE, 'index': ALL}, 'id'),
+    State(ids.LINK_SOURCE_INPUT, 'value'),
+    State(ids.LINK_TARGET_INPUT, 'value'),
     prevent_initial_call=True
 )
 @serialize_model_use
@@ -363,21 +364,21 @@ def run_cpa_iv_callback_active(global_clicks, layer3_clicks, selected_link_trigg
     # selected-node-store; ctx.triggered_id may then name the node store, whose
     # branch bails out in link mode. Resolve against every input that changed.
     _changed = {t['prop_id'].split('.')[0] for t in (ctx.triggered or [])}
-    if analysis_mode == 'link_prediction' and 'selected-link-store' in _changed:
-        triggered = 'selected-link-store'
-    elif analysis_mode == 'node_classification' and 'selected-node-store' in _changed:
-        triggered = 'selected-node-store'
+    if analysis_mode == 'link_prediction' and ids.SELECTED_LINK_STORE in _changed:
+        triggered = ids.SELECTED_LINK_STORE
+    elif analysis_mode == 'node_classification' and ids.SELECTED_NODE_STORE in _changed:
+        triggered = ids.SELECTED_NODE_STORE
 
-    if triggered == 'global-run-button':
+    if triggered == ids.GLOBAL_RUN_BUTTON:
         if (global_clicks or 0) == 0:
             return no_update, no_update, no_update
         if active_layer3_tab == 'tab-stability':
             return no_update, no_update, no_update
-    elif triggered == 'run-cpa-iv-button':
+    elif triggered == ids.RUN_CPA_IV_BUTTON:
         if (layer3_clicks or 0) == 0:
             return no_update, no_update, no_update
     # If the selected-link-store changed, attempt to run CPA for the selected link
-    elif triggered == 'selected-link-store':
+    elif triggered == ids.SELECTED_LINK_STORE:
         # Only run for link prediction mode and when a valid selection exists
         if analysis_mode != 'link_prediction':
             return no_update, no_update, no_update
@@ -385,7 +386,7 @@ def run_cpa_iv_callback_active(global_clicks, layer3_clicks, selected_link_trigg
             return no_update, no_update, no_update
         # Proceed — treat selection as the trigger
     # If the selected-node-store changed, attempt to run CPA for the selected node
-    elif triggered == 'selected-node-store':
+    elif triggered == ids.SELECTED_NODE_STORE:
         # Only run for node classification mode and when a valid selection exists
         if analysis_mode != 'node_classification':
             return no_update, no_update, no_update
@@ -403,7 +404,7 @@ def run_cpa_iv_callback_active(global_clicks, layer3_clicks, selected_link_trigg
     print(f"[CPA-IV] Triggered by {triggered}. Mode: {analysis_mode}")
     print(f"[CPA-IV] layer3_source={layer3_source}, selected_node={selected_node}")
     # selected_link may come from either State or the selected-link input; prefer trigger
-    sel_link = selected_link_trigger if triggered == 'selected-link-store' else selected_link_state
+    sel_link = selected_link_trigger if triggered == ids.SELECTED_LINK_STORE else selected_link_state
     print(f"[CPA-IV] selected_link (raw): {sel_link}")
 
     model = get_cached_model(package_meta, dataset_meta['num_features'], dataset_meta['num_classes'])
@@ -445,7 +446,7 @@ def run_cpa_iv_callback_active(global_clicks, layer3_clicks, selected_link_trigg
         u, v = None, None
 
         # If the callback was triggered by a selected-link change, prefer that selection
-        if triggered == 'selected-link-store' and sel_link and isinstance(sel_link, dict):
+        if triggered == ids.SELECTED_LINK_STORE and sel_link and isinstance(sel_link, dict):
             try:
                 u = int(sel_link.get('source'))
                 v = int(sel_link.get('target'))
@@ -511,72 +512,48 @@ def run_cpa_iv_callback_active(global_clicks, layer3_clicks, selected_link_trigg
 
 
 @callback(
-    Output('causal-layer3-status', 'children'),
-    Output('causal-layer3-status', 'style'),
-    Input('cpa-status-store', 'data'),
-)
-def update_causal_layer3_status(status_data):
-    base_style = {'fontSize': '11px', 'marginBottom': '10px',
-                  'minHeight': '16px', 'fontStyle': 'italic',
-                  'padding': '5px 8px', 'borderRadius': '4px'}
-    if not status_data:
-        return ("Select 'Causal' explainer, enter node IDs above, then click Run.",
-                {**base_style, 'color': '#999', 'backgroundColor': 'transparent'})
 
-    msg  = status_data.get('text', '')
-    kind = status_data.get('type', 'info')
-    if kind == 'success':
-        style = {**base_style, 'color': '#155724', 'backgroundColor': '#d4edda', 'border': '1px solid #c3e6cb'}
-    elif kind == 'error':
-        style = {**base_style, 'color': '#721c24', 'backgroundColor': '#f8d7da', 'border': '1px solid #f5c6cb'}
-    else:
-        style = {**base_style, 'color': '#0c5460', 'backgroundColor': '#d1ecf1', 'border': '1px solid #bee5eb'}
-    return msg, style
+    Output(ids.GRAPH_VIEW, 'elements'),
 
+    Output(ids.NEIGHBOR_IMPORTANCE_VIEW, 'figure'),
 
-@callback(
+    Output(ids.FEATURE_IMPORTANCE_VIEW, 'figure'),
 
-    Output('graph-view', 'elements'),
+    Output(ids.SUBGRAPH_LEGEND_INLINE, 'children'),
 
-    Output('neighbor-importance-view', 'figure'),
+    Output(ids.LAYER3_RIGHT_HEADER, 'children'),
 
-    Output('feature-importance-view', 'figure'),
+    Output(ids.GNN_CAUSAL_EXPLANATION_VIEW, 'children'),
 
-    Output('subgraph-legend-inline', 'children'),
+    Output(ids.GNN_CAUSAL_EXPLANATION_VIEW, 'style'),
 
-    Output('layer3-right-header', 'children'),
+    Input(ids.SELECTED_LINK_STORE, 'data'),
 
-    Output('gnn-causal-explanation-view', 'children'),
+    Input(ids.SELECTED_NODE_STORE, 'data'),
 
-    Output('gnn-causal-explanation-view', 'style'),
+    Input(ids.EXPLANATION_STORE, 'data'),
 
-    Input('selected-link-store', 'data'),
-
-    Input('selected-node-store', 'data'),
-
-    Input('explanation-store', 'data'),
-
-    Input('cpa-iv-store', 'data'),
+    Input(ids.CPA_IV_STORE, 'data'),
     
-    Input('link-cpa-iv-store', 'data'),
+    Input(ids.LINK_CPA_IV_STORE, 'data'),
     
-    Input('selected-path-store', 'data'),
+    Input(ids.SELECTED_PATH_STORE, 'data'),
 
-    Input('analysis-mode-store', 'data'),
+    Input(ids.ANALYSIS_MODE_STORE, 'data'),
 
-    Input('subgraph-color-mode', 'value'),
+    Input(ids.SUBGRAPH_COLOR_MODE, 'value'),
 
-    State('current-predictions-store', 'data'),
+    State(ids.CURRENT_PREDICTIONS_STORE, 'data'),
 
-    State('full-dataset-store', 'data'),
+    State(ids.FULL_DATASET_STORE, 'data'),
 
-    State('editable-graph-store', 'data'),
+    State(ids.EDITABLE_GRAPH_STORE, 'data'),
 
-    State('precomputed-package-store', 'data'),
+    State(ids.PRECOMPUTED_PACKAGE_STORE, 'data'),
 
-    State('model-dropdown', 'value'),
+    State(ids.MODEL_DROPDOWN, 'value'),
 
-    State('layer3-tabs', 'value'),
+    State(ids.LAYER3_TABS, 'value'),
 
     prevent_initial_call=True
 

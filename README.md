@@ -31,6 +31,8 @@ Quick check after the offline phase: `python test_smoke.py`
 - `gnnvis/ui/callbacks/`: the Dash callbacks, one module per feature (session, selection,
   explanation, overview, link, full graph, stability); importing the package registers them.
 - `gnnvis/runtime.py`: device, paths, caches of model packages / datasets / models, locks.
+- `gnnvis/ui/ids.py`: every component id as a constant; layout and callbacks use these,
+  and `tests/test_ids.py` fails if a callback references a component that never exists.
 - `app.py`: the entry point (creates the app, attaches the layout, registers callbacks); `app_stability.py`, `app_expl.py`,
   `cpa_iv_link_prediction.py`, `link_prediction_utils.py`: analysis code.
 - `train_models.py`, `precompute_stability.py`, `precompute_link_stability.py`: offline scripts.

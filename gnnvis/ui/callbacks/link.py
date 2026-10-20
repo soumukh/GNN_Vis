@@ -9,41 +9,42 @@ from link_prediction_utils import create_link_prediction_candidates, get_top_k_p
 from gnnvis.runtime import device, get_cached_dataset, get_cached_dataset_if_missing, get_cached_model, get_cached_package_if_missing, link_test_split, prepare_torch_data, serialize_model_use
 from gnnvis.ui.components import cell_details_placeholder, metric_tiles
 from gnnvis.ui.figures.confusion import link_confusion_figure
+from gnnvis.ui import ids
 
 
 @callback(
 
-    Output('link-prediction-store', 'data', allow_duplicate=True),
+    Output(ids.LINK_PREDICTION_STORE, 'data', allow_duplicate=True),
 
-    Output('link-status-store', 'data'),
+    Output(ids.LINK_STATUS_STORE, 'data'),
 
-    Output('global-run-button', 'children', allow_duplicate=True),
+    Output(ids.GLOBAL_RUN_BUTTON, 'children', allow_duplicate=True),
 
-    Output('global-run-button', 'disabled', allow_duplicate=True),
+    Output(ids.GLOBAL_RUN_BUTTON, 'disabled', allow_duplicate=True),
 
-    Input('predict-links-button', 'n_clicks'),
+    Input(ids.PREDICT_LINKS_BUTTON, 'n_clicks'),
 
-    Input('global-run-button', 'n_clicks'),
+    Input(ids.GLOBAL_RUN_BUTTON, 'n_clicks'),
 
-    State('selected-node-store', 'data'),
+    State(ids.SELECTED_NODE_STORE, 'data'),
 
-    State('selected-link-store', 'data'),
+    State(ids.SELECTED_LINK_STORE, 'data'),
 
-    State({'type': 'lp-input', 'index': ALL}, 'value'),
+    State({'type': ids.LP_INPUT_TYPE, 'index': ALL}, 'value'),
 
-    State({'type': 'lp-input', 'index': ALL}, 'id'),
+    State({'type': ids.LP_INPUT_TYPE, 'index': ALL}, 'id'),
 
-    State('link-source-input', 'value'),
+    State(ids.LINK_SOURCE_INPUT, 'value'),
 
-    State('precomputed-package-store', 'data'),
+    State(ids.PRECOMPUTED_PACKAGE_STORE, 'data'),
 
-    State('full-dataset-store', 'data'),
+    State(ids.FULL_DATASET_STORE, 'data'),
 
-    State('editable-graph-store', 'data'),
+    State(ids.EDITABLE_GRAPH_STORE, 'data'),
 
-    State('model-dropdown', 'value'),
+    State(ids.MODEL_DROPDOWN, 'value'),
 
-    State('analysis-mode-store', 'data'),
+    State(ids.ANALYSIS_MODE_STORE, 'data'),
 
     prevent_initial_call=True
 
@@ -75,7 +76,7 @@ def run_link_prediction_unified(predict_clicks, global_clicks,
 
             return no_update, {'text': 'Dataset not yet loaded.', 'type': 'error'}, "RUN ANALYSIS", False
 
-        n_clicks = global_clicks if triggered_id == 'global-run-button' else predict_clicks
+        n_clicks = global_clicks if triggered_id == ids.GLOBAL_RUN_BUTTON else predict_clicks
 
         if not n_clicks or n_clicks == 0:
 
@@ -101,7 +102,7 @@ def run_link_prediction_unified(predict_clicks, global_clicks,
 
                     manual_source = val
 
-        if triggered_id == 'global-run-button':
+        if triggered_id == ids.GLOBAL_RUN_BUTTON:
 
             if analysis_mode != 'link_prediction':
 
@@ -219,13 +220,13 @@ def run_link_prediction_unified(predict_clicks, global_clicks,
 
 @callback(
 
-    Output('link-prediction-output-active', 'children'),
+    Output(ids.LINK_PREDICTION_OUTPUT_ACTIVE, 'children'),
 
-    Output('link-confidence-plot-active', 'figure'),
+    Output(ids.LINK_CONFIDENCE_PLOT_ACTIVE, 'figure'),
 
-    Output('link-confidence-plot-active', 'style'),
+    Output(ids.LINK_CONFIDENCE_PLOT_ACTIVE, 'style'),
 
-    Input('link-prediction-store', 'data')
+    Input(ids.LINK_PREDICTION_STORE, 'data')
 
 )
 
@@ -238,24 +239,24 @@ def update_link_list(link_predictions):
 
 @callback(
 
-    Output('subgraph-eval-status', 'children'),
+    Output(ids.SUBGRAPH_EVAL_STATUS, 'children'),
 
-    Output('confusion-matrix-plot', 'figure', allow_duplicate=True),
+    Output(ids.CONFUSION_MATRIX_PLOT, 'figure', allow_duplicate=True),
 
-    Output('edge-predictions-display', 'children', allow_duplicate=True),
+    Output(ids.EDGE_PREDICTIONS_DISPLAY, 'children', allow_duplicate=True),
 
-    Output('performance-metrics', 'children'),
-    Output('performance-metrics', 'style'),
-    Output('subgraph-eval-store', 'data'),
-    Output('global-link-analysis-title', 'children', allow_duplicate=True),
+    Output(ids.PERFORMANCE_METRICS, 'children'),
+    Output(ids.PERFORMANCE_METRICS, 'style'),
+    Output(ids.SUBGRAPH_EVAL_STORE, 'data'),
+    Output(ids.GLOBAL_LINK_ANALYSIS_TITLE, 'children', allow_duplicate=True),
 
-    Input('link-prediction-store', 'data'),
-    Input('analysis-mode-store', 'data'),
-    Input('precomputed-package-store', 'data'),
-    State('full-dataset-store', 'data'),
-    State('model-dropdown', 'value'),
-    State('dataset-dropdown', 'value'),
-    State('graph-type-store', 'data'),
+    Input(ids.LINK_PREDICTION_STORE, 'data'),
+    Input(ids.ANALYSIS_MODE_STORE, 'data'),
+    Input(ids.PRECOMPUTED_PACKAGE_STORE, 'data'),
+    State(ids.FULL_DATASET_STORE, 'data'),
+    State(ids.MODEL_DROPDOWN, 'value'),
+    State(ids.DATASET_DROPDOWN, 'value'),
+    State(ids.GRAPH_TYPE_STORE, 'data'),
     prevent_initial_call=True
 )
 def evaluate_subgraph_predictions(link_pred_data, analysis_mode, package, dataset, model_type, dataset_name, graph_type):

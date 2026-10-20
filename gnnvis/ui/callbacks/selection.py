@@ -2,22 +2,23 @@
 
 import dash.dependencies
 from dash import ALL, Input, Output, State, callback, ctx, no_update
+from gnnvis.ui import ids
 
 
 @callback(
-    Output('selected-node-store', 'data'),
-    Input('graph-view', 'tapNodeData'),
-    Input('embeddings-view', 'clickData'),
-    Input('full-graph-view', 'clickData'),
+    Output(ids.SELECTED_NODE_STORE, 'data'),
+    Input(ids.GRAPH_VIEW, 'tapNodeData'),
+    Input(ids.EMBEDDINGS_VIEW, 'clickData'),
+    Input(ids.FULL_GRAPH_VIEW, 'clickData'),
     prevent_initial_call=True,
 )
 def update_selected_node(tapNode, emb_click, full_click):
     trigger_id, node_id = ctx.triggered_id, None
 
-    if trigger_id == 'graph-view' and tapNode:
+    if trigger_id == ids.GRAPH_VIEW and tapNode:
         node_id = tapNode['id']
-    elif trigger_id in ('embeddings-view', 'full-graph-view'):
-        click = emb_click if trigger_id == 'embeddings-view' else full_click
+    elif trigger_id in (ids.EMBEDDINGS_VIEW, ids.FULL_GRAPH_VIEW):
+        click = emb_click if trigger_id == ids.EMBEDDINGS_VIEW else full_click
         cd = ((click or {}).get('points') or [{}])[0].get('customdata')
         if isinstance(cd, (list, tuple)):
             cd = cd[0] if cd else None
@@ -35,9 +36,9 @@ def update_selected_node(tapNode, emb_click, full_click):
 
 @callback(
 
-    Output('selected-node-store', 'data', allow_duplicate=True),
+    Output(ids.SELECTED_NODE_STORE, 'data', allow_duplicate=True),
 
-    Input('select-node-input-nc', 'value'),
+    Input(ids.SELECT_NODE_INPUT_NC, 'value'),
 
     prevent_initial_call=True
 
@@ -54,9 +55,9 @@ def update_selected_node_from_input(input_value):
 
 @callback(
 
-    Output('selected-node-store', 'data', allow_duplicate=True),
+    Output(ids.SELECTED_NODE_STORE, 'data', allow_duplicate=True),
 
-    Input('select-node-input-nc-active', 'value'),
+    Input(ids.SELECT_NODE_INPUT_NC_ACTIVE, 'value'),
 
     prevent_initial_call=True
 
@@ -72,8 +73,8 @@ def update_selected_node_from_input_active(input_value):
 
 
 @callback(
-    Output('selected-node-store', 'data', allow_duplicate=True),
-    Input('global-run-button', 'n_clicks'),
+    Output(ids.SELECTED_NODE_STORE, 'data', allow_duplicate=True),
+    Input(ids.GLOBAL_RUN_BUTTON, 'n_clicks'),
     prevent_initial_call=True
 )
 def clear_node_selection_on_run(run_clicks):
@@ -86,25 +87,25 @@ def clear_node_selection_on_run(run_clicks):
 
 @callback(
 
-    Output('selected-link-store', 'data'),
+    Output(ids.SELECTED_LINK_STORE, 'data'),
 
     # Triggers
 
-    Input('global-run-button', 'n_clicks'),
+    Input(ids.GLOBAL_RUN_BUTTON, 'n_clicks'),
 
-    Input({'type': 'link-prediction-item', 'index': ALL, 'source': ALL, 'target': ALL}, 'n_clicks'),
+    Input({'type': ids.LINK_PREDICTION_ITEM_TYPE, 'index': ALL, 'source': ALL, 'target': ALL}, 'n_clicks'),
 
     # States for manual inputs (kept for signature compatibility but ignored for selection)
 
-    State({'type': 'lp-input', 'index': ALL}, 'value'),
+    State({'type': ids.LP_INPUT_TYPE, 'index': ALL}, 'value'),
 
-    State({'type': 'lp-input', 'index': ALL}, 'id'),
+    State({'type': ids.LP_INPUT_TYPE, 'index': ALL}, 'id'),
 
-    State('analysis-mode-store', 'data'),
+    State(ids.ANALYSIS_MODE_STORE, 'data'),
 
-    State('layer3-tabs', 'value'),
+    State(ids.LAYER3_TABS, 'value'),
 
-    State('full-dataset-store', 'data'),
+    State(ids.FULL_DATASET_STORE, 'data'),
 
     prevent_initial_call=True
 
@@ -134,7 +135,7 @@ def update_selected_link_master(run_clicks, item_clicks, lp_input_values, lp_inp
 
     # This is the ONLY allowed trigger for opening Layer 3
 
-    if isinstance(triggered_id, dict) and triggered_id.get('type') == 'link-prediction-item':
+    if isinstance(triggered_id, dict) and triggered_id.get('type') == ids.LINK_PREDICTION_ITEM_TYPE:
 
         if not any(item_clicks): raise dash.exceptions.PreventUpdate
 
@@ -151,7 +152,7 @@ def update_selected_link_master(run_clicks, item_clicks, lp_input_values, lp_inp
     # Priority 2: "RUN ANALYSIS" clicked
     # Preserve current selection on Run to avoid race conditions where
     # the selection is cleared before downstream callbacks read it.
-    elif triggered_id == 'global-run-button':
+    elif triggered_id == ids.GLOBAL_RUN_BUTTON:
         # Link mode: a typed source + target pair becomes the selected link, which
         # opens its subgraph, explanation and CPA-IV (invalid pairs are reported
         # by run_link_prediction_unified via link-status-store).
@@ -172,17 +173,17 @@ def update_selected_link_master(run_clicks, item_clicks, lp_input_values, lp_inp
 
 
 @callback(
-    Output('selected-path-store', 'data'),
-    Input({'type': 'cpa-path-item', 'index': ALL}, 'n_clicks'),
-    Input({'type': 'cpa-path-item-side', 'index': ALL}, 'n_clicks'),
-    Input('global-run-button', 'n_clicks'),
+    Output(ids.SELECTED_PATH_STORE, 'data'),
+    Input({'type': ids.CPA_PATH_ITEM_TYPE, 'index': ALL}, 'n_clicks'),
+    Input({'type': ids.CPA_PATH_ITEM_SIDE_TYPE, 'index': ALL}, 'n_clicks'),
+    Input(ids.GLOBAL_RUN_BUTTON, 'n_clicks'),
     prevent_initial_call=True
 )
 def update_selected_path(main_clicks, side_clicks, run_clicks):
     trigger = ctx.triggered_id
     
     # Reset on Run
-    if trigger == 'global-run-button':
+    if trigger == ids.GLOBAL_RUN_BUTTON:
         return None
         
     # Handle clicks
@@ -196,9 +197,9 @@ def update_selected_path(main_clicks, side_clicks, run_clicks):
 
 # Allow selecting a node by clicking a cell in the CM detail DataTable
 @callback(
-    Output('selected-node-store', 'data', allow_duplicate=True),
-    Input('cm-detail-table', 'active_cell'),
-    State('cm-detail-table', 'data'),
+    Output(ids.SELECTED_NODE_STORE, 'data', allow_duplicate=True),
+    Input(ids.CM_DETAIL_TABLE, 'active_cell'),
+    State(ids.CM_DETAIL_TABLE, 'data'),
     prevent_initial_call=True,
 )
 def select_node_from_detail_table(active_cell, table_data):
@@ -230,9 +231,9 @@ def select_node_from_detail_table(active_cell, table_data):
 
 # If the details table row represents a link (has both source and target), select that link
 @callback(
-    Output('selected-link-store', 'data', allow_duplicate=True),
-    Input('cm-detail-table', 'active_cell'),
-    State('cm-detail-table', 'data'),
+    Output(ids.SELECTED_LINK_STORE, 'data', allow_duplicate=True),
+    Input(ids.CM_DETAIL_TABLE, 'active_cell'),
+    State(ids.CM_DETAIL_TABLE, 'data'),
     prevent_initial_call=True,
 )
 def select_link_from_detail_table(active_cell, table_data):

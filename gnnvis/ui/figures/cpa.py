@@ -4,6 +4,7 @@ import pandas as pd
 import plotly.express as px
 from dash import html
 from dash import dcc
+from gnnvis.ui import ids
 
 
 def create_feature_attribution_plot(cpa_data):
@@ -157,7 +158,7 @@ def create_cpa_iv_panel(cpa_data, node_idx):
             score_color = '#28a745' if score > 0.01 else ('#e67e22' if score > 0.001 else '#999')
             path_items.append(
                 html.Div(
-                    id={'type': 'cpa-path-item', 'index': i - 1},
+                    id={'type': ids.CPA_PATH_ITEM_TYPE, 'index': i - 1},
                     n_clicks=0,
                     children=[
                         html.Div(style={'display': 'flex', 'justifyContent': 'space-between', 'alignItems': 'center'}, children=[
@@ -383,8 +384,8 @@ def create_cpa_iv_panel(cpa_data, node_idx):
     edit_section = html.Div([
         html.Div("COUNTERFACTUAL EDITING", style={'fontWeight': 'bold', 'fontSize': '11px', 'color': '#666', 'marginBottom': '5px', 'textTransform': 'uppercase'}),
         html.Div([
-             html.Button('Add Direct Edge', id='add-edge-button-cpa', n_clicks=0, style={'background': '#28a745', 'border': 'none', 'color': 'white', 'padding': '6px 12px', 'borderRadius': '2px', 'fontWeight': 'bold', 'cursor': 'pointer', 'marginRight': '5px', 'fontSize': '11px'}),
-             html.Button('Remove Direct Edge', id='remove-edge-button-cpa', n_clicks=0, style={'background': '#dc3545', 'border': 'none', 'color': 'white', 'padding': '6px 12px', 'borderRadius': '2px', 'fontWeight': 'bold', 'cursor': 'pointer', 'fontSize': '11px'})
+             html.Button('Add Direct Edge', id=ids.ADD_EDGE_BUTTON_CPA, n_clicks=0, style={'background': '#28a745', 'border': 'none', 'color': 'white', 'padding': '6px 12px', 'borderRadius': '2px', 'fontWeight': 'bold', 'cursor': 'pointer', 'marginRight': '5px', 'fontSize': '11px'}),
+             html.Button('Remove Direct Edge', id=ids.REMOVE_EDGE_BUTTON_CPA, n_clicks=0, style={'background': '#dc3545', 'border': 'none', 'color': 'white', 'padding': '6px 12px', 'borderRadius': '2px', 'fontWeight': 'bold', 'cursor': 'pointer', 'fontSize': '11px'})
         ], style={'marginBottom': '15px'})
     ])
 

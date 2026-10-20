@@ -6,11 +6,12 @@ from dash import dash_table
 import plotly.graph_objects as go
 
 from gnnvis.ui.theme import class_label
+from gnnvis.ui import ids
 
 
 def _make_cm_detail_table(rows, columns, badge_color):
     return dash_table.DataTable(
-        id='cm-detail-table',
+        id=ids.CM_DETAIL_TABLE,
         data=rows,
         columns=columns,
         style_table={
@@ -48,11 +49,11 @@ def _render_cm_detail_page(rows, columns, badge_color, footer_text, page):
     table = _make_cm_detail_table(paged_rows, columns, badge_color)
     # Reserve space at bottom for pager/footer so table scrolling doesn't hide controls
     nav = html.Div([
-        html.Button('Previous', id='cm-page-prev', n_clicks=0, disabled=(page == 0),
+        html.Button('Previous', id=ids.CM_PAGE_PREV, n_clicks=0, disabled=(page == 0),
                     className='cm-page-button',
                     style={'padding': '7px 14px', 'fontSize': '12px', 'borderRadius': '5px', 'border': '1px solid #999', 'backgroundColor': '#f8f9fa', 'color': '#333'}),
         html.Span(f'Page {page + 1} of {page_count}', style={'fontSize': '12px', 'color': '#555'}),
-        html.Button('Next', id='cm-page-next', n_clicks=0, disabled=(page >= page_count - 1),
+        html.Button('Next', id=ids.CM_PAGE_NEXT, n_clicks=0, disabled=(page >= page_count - 1),
                     className='cm-page-button',
                     style={'padding': '7px 14px', 'fontSize': '12px', 'borderRadius': '5px', 'border': '1px solid #999', 'backgroundColor': '#f8f9fa', 'color': '#333'}),
     ], style={'display': 'flex', 'alignItems': 'center', 'justifyContent': 'space-between', 'gap': '10px', 'marginBottom': '8px', 'flex': 'none'})

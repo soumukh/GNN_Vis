@@ -7,6 +7,7 @@ from gnnvis.ui.layout.overview import overview
 from gnnvis.ui.layout.controls import controls
 from gnnvis.ui.layout.header import header
 from gnnvis.ui.layout.stores import stores
+from gnnvis.ui import ids
 
 
 def build_layout():
@@ -28,7 +29,7 @@ def build_layout():
 
         }, children=[
 
-        dcc.Location(id='url', refresh=True),
+        dcc.Location(id=ids.URL, refresh=True),
 
         html.Div(style={'maxWidth': '100%', 'margin': '0 auto', 'padding': '20px'}, children=[
 
@@ -53,7 +54,7 @@ def build_layout():
 
         # Legacy sections (HIDDEN),
 
-        html.Div(id='node-classification-section', style={'display': 'none'}),
+        html.Div(id=ids.NODE_CLASSIFICATION_SECTION, style={'display': 'none'}),
 
         ])
     )

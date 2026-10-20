@@ -11,13 +11,14 @@ from gnnvis.models import model_capabilities
 from gnnvis.runtime import LINK_STABILITY_LIVE_SAMPLE, prepare_torch_data, private_model
 from gnnvis.ui.components import stability_unsupported_message
 from gnnvis.ui.figures.stability import build_drilldown_scatter, build_region_highlight, build_stability_plots
+from gnnvis.ui import ids
 
 
 @callback(
-    Output('stability-results-store', 'data', allow_duplicate=True),
-    Output('stability-status', 'children', allow_duplicate=True),
-    Input('dataset-dropdown', 'value'),
-    Input('model-dropdown', 'value'),
+    Output(ids.STABILITY_RESULTS_STORE, 'data', allow_duplicate=True),
+    Output(ids.STABILITY_STATUS, 'children', allow_duplicate=True),
+    Input(ids.DATASET_DROPDOWN, 'value'),
+    Input(ids.MODEL_DROPDOWN, 'value'),
     prevent_initial_call=True,
 )
 def reset_stability_on_model_change(_dataset, model_type):
@@ -38,24 +39,24 @@ clientside_callback(
         return "⏳ Running… instant if precomputed; otherwise GNNExplainer runs per node (or on a 100-edge sample for links) and this can take a few minutes.";
     }
     """,
-    Output('stability-status', 'children', allow_duplicate=True),
-    Input('run-stability-button', 'n_clicks'),
+    Output(ids.STABILITY_STATUS, 'children', allow_duplicate=True),
+    Input(ids.RUN_STABILITY_BUTTON, 'n_clicks'),
     prevent_initial_call=True,
 )
 
 
 @callback(
-    Output('stability-results-store', 'data'),
-    Output('stability-status', 'children'),
-    Input('run-stability-button', 'n_clicks'),
-    State('stability-sigma-selector', 'value'),
-    State('stability-sample-size', 'value'),
-    State('precomputed-package-store', 'data'),
-    State('full-dataset-store', 'data'),
-    State('editable-graph-store', 'data'),
-    State('current-predictions-store', 'data'),
-    State('model-dropdown', 'value'),
-    State('analysis-mode-store', 'data'),
+    Output(ids.STABILITY_RESULTS_STORE, 'data'),
+    Output(ids.STABILITY_STATUS, 'children'),
+    Input(ids.RUN_STABILITY_BUTTON, 'n_clicks'),
+    State(ids.STABILITY_SIGMA_SELECTOR, 'value'),
+    State(ids.STABILITY_SAMPLE_SIZE, 'value'),
+    State(ids.PRECOMPUTED_PACKAGE_STORE, 'data'),
+    State(ids.FULL_DATASET_STORE, 'data'),
+    State(ids.EDITABLE_GRAPH_STORE, 'data'),
+    State(ids.CURRENT_PREDICTIONS_STORE, 'data'),
+    State(ids.MODEL_DROPDOWN, 'value'),
+    State(ids.ANALYSIS_MODE_STORE, 'data'),
     prevent_initial_call=True
 )
 def run_stability_callback(n_clicks, sigma, sample_size,
@@ -234,11 +235,11 @@ def run_stability_callback(n_clicks, sigma, sample_size,
 
 
 @callback(
-    Output('main-stability-plot', 'figure'),
-    Output('stability-stats-panel', 'children'),
-    Input('stability-results-store', 'data'),
-    Input('stability-plot-type', 'value'),
-    Input('stability-metric-selector', 'value'),
+    Output(ids.MAIN_STABILITY_PLOT, 'figure'),
+    Output(ids.STABILITY_STATS_PANEL, 'children'),
+    Input(ids.STABILITY_RESULTS_STORE, 'data'),
+    Input(ids.STABILITY_PLOT_TYPE, 'value'),
+    Input(ids.STABILITY_METRIC_SELECTOR, 'value'),
 )
 
 def render_stability_plots(results, plot_type, metric_type):
@@ -252,14 +253,14 @@ _PANEL_SHOWN  = {'flex': '1', 'minWidth': '0', 'flexDirection': 'column', 'gap':
 
 
 @callback(
-    Output('drilldown-click-store',   'data'),
-    Output('drilldown-hint',          'children'),
-    Output('drilldown-right-panel',   'style'),
-    Input('main-stability-plot',      'clickData'),
-    Input('drilldown-reset-btn',      'n_clicks'),
-    State('stability-plot-type',      'value'),
-    State('stability-metric-selector','value'),
-    State('stability-results-store',  'data'),
+    Output(ids.DRILLDOWN_CLICK_STORE,   'data'),
+    Output(ids.DRILLDOWN_HINT,          'children'),
+    Output(ids.DRILLDOWN_RIGHT_PANEL,   'style'),
+    Input(ids.MAIN_STABILITY_PLOT,      'clickData'),
+    Input(ids.DRILLDOWN_RESET_BTN,      'n_clicks'),
+    State(ids.STABILITY_PLOT_TYPE,      'value'),
+    State(ids.STABILITY_METRIC_SELECTOR,'value'),
+    State(ids.STABILITY_RESULTS_STORE,  'data'),
     prevent_initial_call=True,
 )
 def update_drilldown_store(main_click, _reset, plot_type, metric_type, results):
@@ -273,7 +274,7 @@ def update_drilldown_store(main_click, _reset, plot_type, metric_type, results):
     hint = _hints.get(plot_type, 'Click a plot region to drill down into nodes')
 
     triggered = ctx.triggered_id
-    if triggered == 'drilldown-reset-btn':
+    if triggered == ids.DRILLDOWN_RESET_BTN:
         return None, hint, _PANEL_HIDDEN
 
     def _extract_xy(click_payload):
@@ -340,7 +341,7 @@ def update_drilldown_store(main_click, _reset, plot_type, metric_type, results):
         except Exception:
             return None
 
-    if triggered == 'main-stability-plot':
+    if triggered == ids.MAIN_STABILITY_PLOT:
         if not main_click:
             return no_update, hint, no_update
         x_val, y_val = _extract_xy(main_click)
@@ -362,12 +363,12 @@ def update_drilldown_store(main_click, _reset, plot_type, metric_type, results):
 
 
 @callback(
-    Output('drilldown-scatter',      'figure'),
-    Output('drilldown-panel-header', 'children'),
-    Input('drilldown-click-store',    'data'),
-    Input('drilldown-epsilon-slider', 'value'),
-    Input('stability-plot-type',      'value'),
-    State('stability-results-store',  'data'),
+    Output(ids.DRILLDOWN_SCATTER,      'figure'),
+    Output(ids.DRILLDOWN_PANEL_HEADER, 'children'),
+    Input(ids.DRILLDOWN_CLICK_STORE,    'data'),
+    Input(ids.DRILLDOWN_EPSILON_SLIDER, 'value'),
+    Input(ids.STABILITY_PLOT_TYPE,      'value'),
+    State(ids.STABILITY_RESULTS_STORE,  'data'),
     prevent_initial_call=True,
 )
 def render_drilldown_scatter(click_data, epsilon, plot_type, results):
@@ -375,9 +376,9 @@ def render_drilldown_scatter(click_data, epsilon, plot_type, results):
 
 
 @callback(
-    Output('main-stability-plot',   'figure', allow_duplicate=True),
-    Input('drilldown-click-store',     'data'),
-    Input('drilldown-epsilon-slider',  'value'),
+    Output(ids.MAIN_STABILITY_PLOT,   'figure', allow_duplicate=True),
+    Input(ids.DRILLDOWN_CLICK_STORE,     'data'),
+    Input(ids.DRILLDOWN_EPSILON_SLIDER,  'value'),
     prevent_initial_call=True,
 )
 def highlight_region_on_main_plots(click_data, epsilon):

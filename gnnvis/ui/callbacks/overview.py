@@ -9,14 +9,15 @@ from gnnvis.ui.components import cell_details_placeholder, confusion_matrix_styl
 from gnnvis.ui.figures.confusion import _render_cm_detail_page, node_confusion_figure
 from gnnvis.ui.figures.embeddings import get_2d_embeddings, plot_embeddings
 from gnnvis.ui.theme import CORRECT_COLOR, INCORRECT_COLOR, class_color_map, class_label, empty_figure
+from gnnvis.ui import ids
 
 
 @callback(
-    Output('edge-predictions-display', 'children', allow_duplicate=True),
-    Output('cm-detail-paging-store', 'data', allow_duplicate=True),
-    Input('analysis-mode-store', 'data'),
-    Input('dataset-dropdown', 'value'),
-    Input('model-dropdown', 'value'),
+    Output(ids.EDGE_PREDICTIONS_DISPLAY, 'children', allow_duplicate=True),
+    Output(ids.CM_DETAIL_PAGING_STORE, 'data', allow_duplicate=True),
+    Input(ids.ANALYSIS_MODE_STORE, 'data'),
+    Input(ids.DATASET_DROPDOWN, 'value'),
+    Input(ids.MODEL_DROPDOWN, 'value'),
     prevent_initial_call=True,
 )
 def reset_cell_details(analysis_mode, _dataset, _model):
@@ -25,29 +26,29 @@ def reset_cell_details(analysis_mode, _dataset, _model):
 
 
 @callback(
-    Output('confusion-matrix-plot', 'style'),
-    Input('analysis-mode-store', 'data'),
+    Output(ids.CONFUSION_MATRIX_PLOT, 'style'),
+    Input(ids.ANALYSIS_MODE_STORE, 'data'),
 )
 def update_confusion_matrix_style(analysis_mode):
     return confusion_matrix_style(analysis_mode)
 
 
 @callback(
-    Output('embeddings-view', 'figure'),
-    Output('confusion-matrix-plot', 'figure', allow_duplicate=True),
-    Output('gnn-mid-layer-content', 'style'),
-    Input('global-run-button', 'n_clicks'),
-    Input('current-predictions-store', 'data'),
-    Input('cpa-iv-store', 'data'),
-    Input('link-cpa-iv-store', 'data'),
-    Input('embedding-color-mode', 'value'),
-    Input('selected-node-store', 'data'),
-    Input('selected-link-store', 'data'),
-    Input('analysis-mode-store', 'data'),
-    State('precomputed-package-store', 'data'),
-    State('full-dataset-store', 'data'),
-    State('layer3-tabs', 'value'),
-    State('link-prediction-store', 'data'),
+    Output(ids.EMBEDDINGS_VIEW, 'figure'),
+    Output(ids.CONFUSION_MATRIX_PLOT, 'figure', allow_duplicate=True),
+    Output(ids.GNN_MID_LAYER_CONTENT, 'style'),
+    Input(ids.GLOBAL_RUN_BUTTON, 'n_clicks'),
+    Input(ids.CURRENT_PREDICTIONS_STORE, 'data'),
+    Input(ids.CPA_IV_STORE, 'data'),
+    Input(ids.LINK_CPA_IV_STORE, 'data'),
+    Input(ids.EMBEDDING_COLOR_MODE, 'value'),
+    Input(ids.SELECTED_NODE_STORE, 'data'),
+    Input(ids.SELECTED_LINK_STORE, 'data'),
+    Input(ids.ANALYSIS_MODE_STORE, 'data'),
+    State(ids.PRECOMPUTED_PACKAGE_STORE, 'data'),
+    State(ids.FULL_DATASET_STORE, 'data'),
+    State(ids.LAYER3_TABS, 'value'),
+    State(ids.LINK_PREDICTION_STORE, 'data'),
     prevent_initial_call=True
 )
 def update_mid_layer(n_clicks, predictions_data, cpa_data, link_cpa_data, embedding_color_mode, selected_node, selected_link, analysis_mode, package, dataset, active_layer3_tab, link_prediction_store):
@@ -118,12 +119,12 @@ def update_mid_layer(n_clicks, predictions_data, cpa_data, link_cpa_data, embedd
 
 # Node classification performance metrics — populate the same `performance-metrics` area
 @callback(
-    Output('performance-metrics', 'children', allow_duplicate=True),
-    Output('performance-metrics', 'style', allow_duplicate=True),
-    Input('global-run-button', 'n_clicks'),
-    Input('current-predictions-store', 'data'),
-    Input('analysis-mode-store', 'data'),
-    State('full-dataset-store', 'data'),
+    Output(ids.PERFORMANCE_METRICS, 'children', allow_duplicate=True),
+    Output(ids.PERFORMANCE_METRICS, 'style', allow_duplicate=True),
+    Input(ids.GLOBAL_RUN_BUTTON, 'n_clicks'),
+    Input(ids.CURRENT_PREDICTIONS_STORE, 'data'),
+    Input(ids.ANALYSIS_MODE_STORE, 'data'),
+    State(ids.FULL_DATASET_STORE, 'data'),
     prevent_initial_call=True,
 )
 def update_node_performance_metrics(run_clicks, predictions_data, analysis_mode, dataset_meta):
@@ -168,14 +169,14 @@ def update_node_performance_metrics(run_clicks, predictions_data, analysis_mode,
 
 
 @callback(
-    Output('edge-predictions-display', 'children', allow_duplicate=True),
-    Output('global-link-analysis-title', 'children', allow_duplicate=True),
-    Output('cm-detail-paging-store', 'data', allow_duplicate=True),
-    Input('confusion-matrix-plot', 'clickData'),
-    State('subgraph-eval-store', 'data'),
-    State('analysis-mode-store', 'data'),
-    State('current-predictions-store', 'data'),
-    State('full-dataset-store', 'data'),
+    Output(ids.EDGE_PREDICTIONS_DISPLAY, 'children', allow_duplicate=True),
+    Output(ids.GLOBAL_LINK_ANALYSIS_TITLE, 'children', allow_duplicate=True),
+    Output(ids.CM_DETAIL_PAGING_STORE, 'data', allow_duplicate=True),
+    Input(ids.CONFUSION_MATRIX_PLOT, 'clickData'),
+    State(ids.SUBGRAPH_EVAL_STORE, 'data'),
+    State(ids.ANALYSIS_MODE_STORE, 'data'),
+    State(ids.CURRENT_PREDICTIONS_STORE, 'data'),
+    State(ids.FULL_DATASET_STORE, 'data'),
     prevent_initial_call=True
 )
 def update_edge_list_from_cm(clickData, eval_data, analysis_mode, predictions_data, dataset):
@@ -436,11 +437,11 @@ def update_edge_list_from_cm(clickData, eval_data, analysis_mode, predictions_da
 
 
 @callback(
-    Output('edge-predictions-display', 'children', allow_duplicate=True),
-    Output('cm-detail-paging-store', 'data', allow_duplicate=True),
-    Input('cm-page-prev', 'n_clicks'),
-    Input('cm-page-next', 'n_clicks'),
-    State('cm-detail-paging-store', 'data'),
+    Output(ids.EDGE_PREDICTIONS_DISPLAY, 'children', allow_duplicate=True),
+    Output(ids.CM_DETAIL_PAGING_STORE, 'data', allow_duplicate=True),
+    Input(ids.CM_PAGE_PREV, 'n_clicks'),
+    Input(ids.CM_PAGE_NEXT, 'n_clicks'),
+    State(ids.CM_DETAIL_PAGING_STORE, 'data'),
     prevent_initial_call=True
 )
 def update_cm_detail_page(prev_clicks, next_clicks, paging_data):
@@ -448,13 +449,13 @@ def update_cm_detail_page(prev_clicks, next_clicks, paging_data):
         return no_update, no_update
 
     triggered_id = ctx.triggered_id
-    if triggered_id not in {'cm-page-prev', 'cm-page-next'}:
+    if triggered_id not in {ids.CM_PAGE_PREV, ids.CM_PAGE_NEXT}:
         return no_update, no_update
 
     current_page = paging_data.get('page', 0)
     page_count = paging_data.get('page_count', 1)
 
-    if triggered_id == 'cm-page-prev':
+    if triggered_id == ids.CM_PAGE_PREV:
         new_page = max(0, current_page - 1)
     else:
         new_page = min(page_count - 1, current_page + 1)

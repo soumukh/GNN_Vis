@@ -4,6 +4,7 @@ import dash_cytoscape as cyto
 from dash import html, dcc
 
 from gnnvis.ui.figures.subgraph import STYLESHEET
+from gnnvis.ui import ids
 
 
 def explanation_tab():
@@ -61,7 +62,7 @@ def explanation_tab():
                             html.Div(className='subgraph-toolbar', children=[
                                 html.Span("Colour by", className='control-label'),
                                 dcc.RadioItems(
-                                    id='subgraph-color-mode',
+                                    id=ids.SUBGRAPH_COLOR_MODE,
                                     options=[
                                         {'label': 'Actual class', 'value': 'actual'},
                                         {'label': 'Predicted class', 'value': 'predicted'},
@@ -75,7 +76,7 @@ def explanation_tab():
                                           title="Green edges were selected by GNNExplainer (mask > 0.1); thicker = more important."),
                             ]),
                             dcc.Loading(type='dot', color='#2563eb', children=cyto.Cytoscape(
-                                id='graph-view',
+                                id=ids.GRAPH_VIEW,
                                 stylesheet=STYLESHEET,
                                 layout={'name': 'cose', 'animate': False, 'randomize': False, 'fit': True},
                                 style={
@@ -87,7 +88,7 @@ def explanation_tab():
                                 }
                             )),
                             # Inline legend placed over the bottom-left of the subgraph panel
-                            html.Div(id='subgraph-legend-inline', style={
+                            html.Div(id=ids.SUBGRAPH_LEGEND_INLINE, style={
                                 'marginTop': '8px',
                                 'backgroundColor': '#ffffff',
                                 'padding': '8px 10px',
@@ -113,12 +114,12 @@ def explanation_tab():
                             'overflow': 'hidden'
                         }, children=[
                             html.H6("Neighbor Importance",
-                                id='layer3-right-header',
+                                id=ids.LAYER3_RIGHT_HEADER,
                                 style={'fontWeight': 'bold', 'fontSize': '12px',
                                        'color': '#0056b3', 'margin': '0 0 6px 0',
                                        'textTransform': 'uppercase', 'letterSpacing': '0.3px'}),
                             dcc.Loading(type='dot', color='#2563eb', children=dcc.Graph(
-                                id='neighbor-importance-view',
+                                id=ids.NEIGHBOR_IMPORTANCE_VIEW,
                                 style={
                                     'height': '320px',
                                     'width': '100%',
@@ -149,7 +150,7 @@ def explanation_tab():
                                            'color': '#0056b3', 'margin': '0 0 6px 0',
                                            'textTransform': 'uppercase', 'letterSpacing': '0.3px'}),
                             dcc.Loading(type='dot', color='#2563eb', children=dcc.Graph(
-                                id='feature-importance-view',
+                                id=ids.FEATURE_IMPORTANCE_VIEW,
                                 style={'height': '300px', 'width': '100%'},
                                 config={'displayModeBar': False},
                             )),
@@ -165,7 +166,7 @@ def explanation_tab():
                         'boxSizing': 'border-box',
                         'marginTop': '16px'
                     }, children=[
-                        html.Div(id='gnn-causal-explanation-view', style={'display': 'none'})
+                        html.Div(id=ids.GNN_CAUSAL_EXPLANATION_VIEW, style={'display': 'none'})
                     ]),
 
                     # ── A6: Subgraph Legend (moved inline into the Local Subgraph panel)

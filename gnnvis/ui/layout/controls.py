@@ -3,11 +3,12 @@
 from dash import html, dcc
 
 from gnnvis.config import AVAILABLE_DATASETS, DEFAULT_DATASET, DEFAULT_MODEL, AVAILABLE_MODELS
+from gnnvis.ui import ids
 
 
 def controls():
     return (
-        html.Div(id='layer-1', style={'borderBottom': 'none', 'paddingTop': '1px', 'paddingBottom': '15px', 'marginBottom': '20px'}, children=[
+        html.Div(id=ids.LAYER_1, style={'borderBottom': 'none', 'paddingTop': '1px', 'paddingBottom': '15px', 'marginBottom': '20px'}, children=[
 
             # Layer label
             #html.Div(style={'marginBottom': '10px', 'display': 'flex', 'alignItems': 'center', 'gap': '8px'}, children=[
@@ -48,7 +49,7 @@ def controls():
                         }
                     ),
                     dcc.RadioItems(
-                        id='analysis-mode-switch',
+                        id=ids.ANALYSIS_MODE_SWITCH,
                         options=[
                             {'label': ' Node', 'value': 'node_classification'},
                             {'label': ' Link', 'value': 'link_prediction'}
@@ -84,7 +85,7 @@ def controls():
                         }
                     ),
                     dcc.Dropdown(
-                        id='dataset-dropdown',
+                        id=ids.DATASET_DROPDOWN,
                         options=AVAILABLE_DATASETS,
                         value=DEFAULT_DATASET,
                         clearable=False,
@@ -117,7 +118,7 @@ def controls():
                         }
                     ),
                     dcc.Dropdown(
-                        id='model-dropdown',
+                        id=ids.MODEL_DROPDOWN,
                         options=AVAILABLE_MODELS,
                         value=DEFAULT_MODEL,
                         clearable=False,
@@ -150,7 +151,7 @@ def controls():
                         }
                     ),
                     html.Div(
-                        id='selection-interface',
+                        id=ids.SELECTION_INTERFACE,
                         style={'minWidth': '150px'}
                     )
                 ]
@@ -159,7 +160,7 @@ def controls():
         ),
 
                 # Compact performance metrics centered between left controls and right buttons
-                html.Div(id='performance-metrics', style={'flex': '0 0 auto', 'alignSelf': 'center', 'display': 'none', 'gap': '6px', 'alignItems': 'center', 'fontSize': '18px', 'fontWeight': 'bold'}),
+                html.Div(id=ids.PERFORMANCE_METRICS, style={'flex': '0 0 auto', 'alignSelf': 'center', 'display': 'none', 'gap': '6px', 'alignItems': 'center', 'fontSize': '18px', 'fontWeight': 'bold'}),
 
                 # Right Control (Buttons),
 
@@ -169,7 +170,7 @@ def controls():
 
                         "RESET", 
 
-                        id='reset-button', 
+                        id=ids.RESET_BUTTON, 
 
                         n_clicks=0,
 
@@ -201,7 +202,7 @@ def controls():
 
                         "RUN ANALYSIS", 
 
-                        id='global-run-button', 
+                        id=ids.GLOBAL_RUN_BUTTON, 
 
                         n_clicks=0,
 
@@ -234,7 +235,7 @@ def controls():
             ]),
 
             # dynamic-analysis-tabs removed — GNN/Causal/Stability handled entirely in Layer 3 tabs
-            html.Div(id='dynamic-analysis-tabs', style={'display': 'none'}),
+            html.Div(id=ids.DYNAMIC_ANALYSIS_TABS, style={'display': 'none'}),
 
         ])
     )

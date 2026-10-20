@@ -2,6 +2,7 @@
 
 import plotly.graph_objects as go
 from dash import html, dcc
+from gnnvis.ui import ids
 
 
 def full_graph_tab():
@@ -45,7 +46,7 @@ def full_graph_tab():
                         html.Div(style={'display': 'flex', 'alignItems': 'center', 'gap': '10px'}, children=[
                             html.Label("Node Color", style={'fontWeight': 'bold', 'fontSize': '12px', 'color': '#333', 'marginBottom': '0'}),
                             dcc.Dropdown(
-                                id='full-graph-color-mode',
+                                id=ids.FULL_GRAPH_COLOR_MODE,
                                 options=[
                                     {'label': 'Predicted class', 'value': 'predicted'},
                                     {'label': 'Actual class', 'value': 'actual'},
@@ -59,7 +60,7 @@ def full_graph_tab():
                         html.Div(style={'display': 'flex', 'alignItems': 'center', 'gap': '10px'}, children=[
                             html.Label("Filter by", style={'fontWeight': 'bold', 'fontSize': '12px', 'color': '#333', 'marginBottom': '0'}),
                             dcc.Dropdown(
-                                id='full-graph-filter-metric',
+                                id=ids.FULL_GRAPH_FILTER_METRIC,
                                 options=[
                                     {'label': 'Confidence', 'value': 'confidence'},
                                     {'label': 'Stability', 'value': 'stability'},
@@ -72,7 +73,7 @@ def full_graph_tab():
                         html.Div(style={'minWidth': '280px', 'maxWidth': '380px'}, children=[
                             html.Label("Filter range", style={'fontWeight': 'bold', 'fontSize': '12px', 'color': '#333', 'marginBottom': '6px', 'display': 'block'}),
                             dcc.RangeSlider(
-                                id='full-graph-filter-range',
+                                id=ids.FULL_GRAPH_FILTER_RANGE,
                                 min=0, max=1, step=0.01, value=[0, 1],
                                 marks={0: '0', 0.5: '0.5', 1: '1'},
                                 allowCross=False,
@@ -81,7 +82,7 @@ def full_graph_tab():
                         ]),
                     ]),
                     dcc.Loading(type='dot', color='#2563eb', children=dcc.Graph(
-                        id='full-graph-view',
+                        id=ids.FULL_GRAPH_VIEW,
                         style={'width': '100%', 'height': '760px', 'minHeight': '760px'},
                         config={
                             'displayModeBar': True,

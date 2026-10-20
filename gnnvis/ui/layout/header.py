@@ -1,6 +1,7 @@
 """Header: title, subtitle and the live status line."""
 
 from dash import html
+from gnnvis.ui import ids
 
 
 def header():
@@ -11,6 +12,6 @@ def header():
                 html.Span("Visual analytics for GCN / GAT predictions, explanations and stability",
                           className='app-subtitle'),
             ]),
-            html.Div(id='status-bar', className='status-bar'),
+            html.Div(id=ids.STATUS_BAR, className='status-bar'),
         ])
     )

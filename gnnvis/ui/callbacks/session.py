@@ -6,18 +6,19 @@ from dash import clientside_callback, Input, Output, State, callback, ctx, dcc, 
 from app_expl import run_inference
 
 from gnnvis.runtime import get_cached_dataset_if_missing, get_cached_model, get_cached_package_if_missing, package_meta_from_selection, prepare_torch_data, serialize_model_use
+from gnnvis.ui import ids
 
 
 @callback(
-    Output('status-bar', 'children'),
-    Input('dataset-dropdown', 'value'),
-    Input('model-dropdown', 'value'),
-    Input('analysis-mode-store', 'data'),
-    Input('current-predictions-store', 'data'),
-    Input('selected-node-store', 'data'),
-    Input('selected-link-store', 'data'),
-    Input('explanation-store', 'data'),
-    Input('link-status-store', 'data'),
+    Output(ids.STATUS_BAR, 'children'),
+    Input(ids.DATASET_DROPDOWN, 'value'),
+    Input(ids.MODEL_DROPDOWN, 'value'),
+    Input(ids.ANALYSIS_MODE_STORE, 'data'),
+    Input(ids.CURRENT_PREDICTIONS_STORE, 'data'),
+    Input(ids.SELECTED_NODE_STORE, 'data'),
+    Input(ids.SELECTED_LINK_STORE, 'data'),
+    Input(ids.EXPLANATION_STORE, 'data'),
+    Input(ids.LINK_STATUS_STORE, 'data'),
 )
 def update_status_bar(dataset_name, model_type, analysis_mode, predictions_data, selected_node, selected_link, explanation, link_status):
     """Breadcrumb of the current context plus the next step to take."""
@@ -55,11 +56,11 @@ def update_status_bar(dataset_name, model_type, analysis_mode, predictions_data,
 
 
 @callback(
-    Output('analysis-mode-store', 'data'),
-    Output('selection-interface', 'children'),
-    Output('dynamic-analysis-tabs', 'children'),
-    Output('graph-type-store', 'data'),
-    Input('analysis-mode-switch', 'value'),
+    Output(ids.ANALYSIS_MODE_STORE, 'data'),
+    Output(ids.SELECTION_INTERFACE, 'children'),
+    Output(ids.DYNAMIC_ANALYSIS_TABS, 'children'),
+    Output(ids.GRAPH_TYPE_STORE, 'data'),
+    Input(ids.ANALYSIS_MODE_SWITCH, 'value'),
 )
 def update_analysis_mode(mode):
     """Layer 1 only controls task mode. All explanation logic lives in Layer 3 tabs."""
@@ -71,14 +72,14 @@ def update_analysis_mode(mode):
             html.Div(style={'display': 'flex', 'gap': '10px', 'marginBottom': '5px'}, children=[
                 html.Div(style={'flex': '1'}, children=[
                     dcc.Input(
-                        id={'type': 'lp-input', 'index': 'source-active'},
+                        id={'type': ids.LP_INPUT_TYPE, 'index': 'source-active'},
                         type='number', placeholder='Source', min=0, step=1,
                         style={'width': '100px'}
                     )
                 ]),
                 html.Div(style={'flex': '1'}, children=[
                     dcc.Input(
-                        id={'type': 'lp-input', 'index': 'target-active'},
+                        id={'type': ids.LP_INPUT_TYPE, 'index': 'target-active'},
                         type='number', placeholder='Target', min=0, step=1,
                         style={'width': '130px'}
                     )
@@ -89,19 +90,19 @@ def update_analysis_mode(mode):
     else:
         # Node classification — node ID input
         selection_interface = dcc.Input(
-            id='select-node-input-nc-active',
+            id=ids.SELECT_NODE_INPUT_NC_ACTIVE,
             type='number', placeholder='Enter Node ID...',
             min=0, step=1, style={'width': '100%', 'marginTop': '5px'}
         )
 
     # Keep DOM components that callbacks depend on (hidden — they were inside the old tabs)
     kept_components = html.Div(style={'display': 'none'}, children=[
-        dcc.Input(id='edge-source-input', type='number', value=None),
-        dcc.Input(id='edge-target-input', type='number', value=None),
-        html.Button(id='add-edge-button-nc', n_clicks=0),
-        html.Button(id='remove-edge-button-nc', n_clicks=0),
-        html.Div(id='subgraph-eval-status'),
-        dcc.Input(id={'type': 'lp-input', 'index': 'pred-node'}, type='number', value=None),
+        dcc.Input(id=ids.EDGE_SOURCE_INPUT, type='number', value=None),
+        dcc.Input(id=ids.EDGE_TARGET_INPUT, type='number', value=None),
+        html.Button(id=ids.ADD_EDGE_BUTTON_NC, n_clicks=0),
+        html.Button(id=ids.REMOVE_EDGE_BUTTON_NC, n_clicks=0),
+        html.Div(id=ids.SUBGRAPH_EVAL_STATUS),
+        dcc.Input(id={'type': ids.LP_INPUT_TYPE, 'index': 'pred-node'}, type='number', value=None),
     ])
 
     return mode, selection_interface, kept_components, graph_type
@@ -109,9 +110,9 @@ def update_analysis_mode(mode):
 
 @callback(
 
-    Output('node-classification-section', 'style'),
+    Output(ids.NODE_CLASSIFICATION_SECTION, 'style'),
 
-    Input('analysis-mode-switch', 'value')
+    Input(ids.ANALYSIS_MODE_SWITCH, 'value')
 
 )
 
@@ -134,11 +135,11 @@ def toggle_node_classification_section(mode):
 
 @callback(
 
-    Output('precomputed-package-store', 'data'), Output('full-dataset-store', 'data'),
+    Output(ids.PRECOMPUTED_PACKAGE_STORE, 'data'), Output(ids.FULL_DATASET_STORE, 'data'),
 
-    Output('editable-graph-store', 'data'), Output('current-predictions-store', 'data'),
+    Output(ids.EDITABLE_GRAPH_STORE, 'data'), Output(ids.CURRENT_PREDICTIONS_STORE, 'data'),
 
-    Input('dataset-dropdown', 'value'), Input('model-dropdown', 'value'),
+    Input(ids.DATASET_DROPDOWN, 'value'), Input(ids.MODEL_DROPDOWN, 'value'),
 
     prevent_initial_call=False
 
@@ -248,17 +249,17 @@ def load_initial_data(dataset_name, model_type):
 
 @callback(
 
-    Output('editable-graph-store', 'data', allow_duplicate=True),
+    Output(ids.EDITABLE_GRAPH_STORE, 'data', allow_duplicate=True),
 
-    Output('edge-status-store', 'data'),
+    Output(ids.EDGE_STATUS_STORE, 'data'),
 
-    Input('add-edge-button-nc', 'n_clicks'), Input('remove-edge-button-nc', 'n_clicks'),
+    Input(ids.ADD_EDGE_BUTTON_NC, 'n_clicks'), Input(ids.REMOVE_EDGE_BUTTON_NC, 'n_clicks'),
 
-    Input('add-edge-button-lp', 'n_clicks'), Input('remove-edge-button-lp', 'n_clicks'),
+    Input(ids.ADD_EDGE_BUTTON_LP, 'n_clicks'), Input(ids.REMOVE_EDGE_BUTTON_LP, 'n_clicks'),
 
-    State('edge-source-input', 'value'), State('edge-target-input', 'value'),
+    State(ids.EDGE_SOURCE_INPUT, 'value'), State(ids.EDGE_TARGET_INPUT, 'value'),
 
-    State('editable-graph-store', 'data'), State('full-dataset-store', 'data'),
+    State(ids.EDITABLE_GRAPH_STORE, 'data'), State(ids.FULL_DATASET_STORE, 'data'),
 
     prevent_initial_call=True
 
@@ -279,7 +280,7 @@ def update_edges(add_clicks, remove_clicks, add_clicks_lp, remove_clicks_lp, sou
 
     status = no_update
 
-    if triggered_id in ['add-edge-button-nc', 'add-edge-button-lp']:
+    if triggered_id in [ids.ADD_EDGE_BUTTON_NC, ids.ADD_EDGE_BUTTON_LP]:
 
         if (source, target) not in set(zip(edge_index[0], edge_index[1])):
 
@@ -293,7 +294,7 @@ def update_edges(add_clicks, remove_clicks, add_clicks_lp, remove_clicks_lp, sou
 
              return no_update, {'text': f'Edge {source}-{target} already exists.', 'type': 'info'}
 
-    elif triggered_id in ['remove-edge-button-nc', 'remove-edge-button-lp']:
+    elif triggered_id in [ids.REMOVE_EDGE_BUTTON_NC, ids.REMOVE_EDGE_BUTTON_LP]:
 
         new_edge_index = [[], []]
 
@@ -324,15 +325,15 @@ def update_edges(add_clicks, remove_clicks, add_clicks_lp, remove_clicks_lp, sou
 
 @callback(
 
-    Output('current-predictions-store', 'data', allow_duplicate=True),
+    Output(ids.CURRENT_PREDICTIONS_STORE, 'data', allow_duplicate=True),
 
-    Input('editable-graph-store', 'data'),
+    Input(ids.EDITABLE_GRAPH_STORE, 'data'),
 
-    State('full-dataset-store', 'data'),
+    State(ids.FULL_DATASET_STORE, 'data'),
 
-    State('precomputed-package-store', 'data'),
+    State(ids.PRECOMPUTED_PACKAGE_STORE, 'data'),
 
-    State('model-dropdown', 'value'),
+    State(ids.MODEL_DROPDOWN, 'value'),
 
     prevent_initial_call=True
 
@@ -367,9 +368,9 @@ def update_predictions_on_edit(graph_data, dataset_meta, package_meta, model_typ
 
 @callback(
 
-    Output('url', 'href'),
+    Output(ids.URL, 'href'),
 
-    Input('reset-button', 'n_clicks'),
+    Input(ids.RESET_BUTTON, 'n_clicks'),
 
     prevent_initial_call=True
 
@@ -387,15 +388,15 @@ def reset_application(n_clicks):
 
 
 @callback(
-    Output('layer-2', 'style'),
-    Output('layer-3', 'style'),
-    Input('global-run-button', 'n_clicks'),
-    Input('selected-link-store', 'data'),
-    Input('selected-node-store', 'data'),
-    Input('analysis-mode-store', 'data'),
-    Input('reset-button', 'n_clicks'),
-    Input('current-predictions-store', 'data'),
-    State('layer3-tabs', 'value'),
+    Output(ids.LAYER_2, 'style'),
+    Output(ids.LAYER_3, 'style'),
+    Input(ids.GLOBAL_RUN_BUTTON, 'n_clicks'),
+    Input(ids.SELECTED_LINK_STORE, 'data'),
+    Input(ids.SELECTED_NODE_STORE, 'data'),
+    Input(ids.ANALYSIS_MODE_STORE, 'data'),
+    Input(ids.RESET_BUTTON, 'n_clicks'),
+    Input(ids.CURRENT_PREDICTIONS_STORE, 'data'),
+    State(ids.LAYER3_TABS, 'value'),
     prevent_initial_call=False
 )
 
@@ -438,10 +439,10 @@ clientside_callback(
 
     """,
 
-    Output('global-run-button', 'children'),
+    Output(ids.GLOBAL_RUN_BUTTON, 'children'),
 
-    Output('global-run-button', 'disabled'),
+    Output(ids.GLOBAL_RUN_BUTTON, 'disabled'),
 
-    Input('global-run-button', 'n_clicks')
+    Input(ids.GLOBAL_RUN_BUTTON, 'n_clicks')
 
 )
