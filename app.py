@@ -857,6 +857,15 @@ def explanation_cards(cpa_content, attention_content):
     return html.Div(cards, style={'display': 'flex', 'gap': '14px', 'alignItems': 'flex-start', 'flexWrap': 'wrap'})
 
 
+def confusion_matrix_style(analysis_mode):
+    """Graph style for the confusion matrix: fill the panel, but never shrink
+    below a readable size (7x7 node matrix needs more room than 2x2 links).
+    The panel has overflow:auto, so a scroll bar appears only if it is shorter."""
+    min_h = '240px' if analysis_mode == 'link_prediction' else '380px'
+    return {'height': '100%', 'minHeight': min_h, 'minWidth': '300px', 'width': '100%',
+            'cursor': 'pointer', 'margin': '0', 'padding': '0'}
+
+
 def cell_details_placeholder(analysis_mode='node_classification'):
     """Cell-details panel before any confusion-matrix cell is clicked."""
     what = ("its edges (TP / FP / FN / TN); click a row to inspect that link"
@@ -2725,8 +2734,10 @@ app.layout = html.Div(style={
                     # in the shorter panel (the matrix computes instantly anyway).
                     dcc.Graph(
                         id='confusion-matrix-plot',
-                        # Fixed readable size; the panel scrolls instead of clipping it
-                        style={'height': '440px', 'minWidth': '400px', 'width': '100%', 'cursor': 'pointer', 'margin': '0', 'padding': '0'},
+                        # Fills the panel; the minimum height (per view, see
+                        # confusion_matrix_style) makes the panel scroll only when
+                        # the matrix would otherwise be squeezed
+                        style=confusion_matrix_style('node_classification'),
                         config={'displayModeBar': False, 'responsive': True},
                     ),
                 ]),
@@ -3649,6 +3660,14 @@ def reset_cell_details(analysis_mode, _dataset, _model):
 
 
 @callback(
+    Output('confusion-matrix-plot', 'style'),
+    Input('analysis-mode-store', 'data'),
+)
+def update_confusion_matrix_style(analysis_mode):
+    return confusion_matrix_style(analysis_mode)
+
+
+@callback(
     Output('stability-results-store', 'data', allow_duplicate=True),
     Output('stability-status', 'children', allow_duplicate=True),
     Input('dataset-dropdown', 'value'),
@@ -3672,8 +3691,9 @@ def reset_stability_on_model_change(_dataset, model_type):
     Input('selected-node-store', 'data'),
     Input('selected-link-store', 'data'),
     Input('explanation-store', 'data'),
+    Input('link-status-store', 'data'),
 )
-def update_status_bar(dataset_name, model_type, analysis_mode, predictions_data, selected_node, selected_link, explanation):
+def update_status_bar(dataset_name, model_type, analysis_mode, predictions_data, selected_node, selected_link, explanation, link_status):
     """Breadcrumb of the current context plus the next step to take."""
     task = 'Link prediction' if analysis_mode == 'link_prediction' else 'Node classification'
     chips = [html.Span(f"{dataset_name} · {model_type} · {task}", className='chip chip-context')]
@@ -3683,12 +3703,14 @@ def update_status_bar(dataset_name, model_type, analysis_mode, predictions_data,
         return chips
 
     if analysis_mode == 'link_prediction':
+        if isinstance(link_status, dict) and link_status.get('type') == 'error':
+            chips.append(html.Span(link_status.get('text', 'Error'), className='chip chip-error'))
         if selected_link:
             chips.append(html.Span(f"Link {selected_link.get('source')} → {selected_link.get('target')}", className='chip'))
             step = "Inspect the causal paths and subgraph below."
         else:
-            step = ("Press RUN ANALYSIS, click a confusion-matrix cell, then a link in its list "
-                    "to inspect it.")
+            step = ("Enter source and target node IDs and press RUN ANALYSIS, or click a "
+                    "confusion-matrix cell and then a link in its list.")
     else:
         node_id = (selected_node or {}).get('id')
         explained = (isinstance(explanation, dict) and explanation.get('explanation_type') == 'node_classification'
@@ -3731,7 +3753,7 @@ def update_analysis_mode(mode):
                 html.Div(style={'flex': '1'}, children=[
                     dcc.Input(
                         id={'type': 'lp-input', 'index': 'target-active'},
-                        type='number', placeholder='Target (optional)', min=0, step=1,
+                        type='number', placeholder='Target', min=0, step=1,
                         style={'width': '130px'}
                     )
                 ])
@@ -4114,11 +4136,13 @@ def clear_node_selection_on_run(run_clicks):
 
     State('layer3-tabs', 'value'),
 
+    State('full-dataset-store', 'data'),
+
     prevent_initial_call=True
 
 )
 
-def update_selected_link_master(run_clicks, item_clicks, lp_input_values, lp_input_ids, analysis_mode, active_layer3_tab):
+def update_selected_link_master(run_clicks, item_clicks, lp_input_values, lp_input_ids, analysis_mode, active_layer3_tab, dataset_meta):
 
     """
 
@@ -4160,6 +4184,19 @@ def update_selected_link_master(run_clicks, item_clicks, lp_input_values, lp_inp
     # Preserve current selection on Run to avoid race conditions where
     # the selection is cleared before downstream callbacks read it.
     elif triggered_id == 'global-run-button':
+        # Link mode: a typed source + target pair becomes the selected link, which
+        # opens its subgraph, explanation and CPA-IV (invalid pairs are reported
+        # by run_link_prediction_unified via link-status-store).
+        if analysis_mode == 'link_prediction' and lp_input_values and lp_input_ids:
+            vals = {i.get('index'): v for v, i in zip(lp_input_values, lp_input_ids)}
+            try:
+                u, v = int(vals.get('source-active')), int(vals.get('target-active'))
+            except (TypeError, ValueError):
+                return no_update
+            n = (dataset_meta or {}).get('num_nodes') or 0
+            if u != v and 0 <= u < n and 0 <= v < n:
+                print(f"RUN ANALYSIS with typed link ({u}, {v}) - selecting it.")
+                return {'source': u, 'target': v}
         print("RUN ANALYSIS clicked - preserving selected link (no clear).")
         return no_update
 
@@ -4538,8 +4575,9 @@ def run_link_prediction_unified(predict_clicks, global_clicks,
                     u, v = int(manual_source), int(manual_target)
 
                     if not (0 <= u < dataset['num_nodes'] and 0 <= v < dataset['num_nodes']):
-
-                         return [], {'text': f"Invalid node IDs: {u}, {v}", "type": "error"}, "RUN ANALYSIS", False
+                         return no_update, {'text': f"Node IDs must be between 0 and {dataset['num_nodes'] - 1} (got {u}, {v}).", "type": "error"}, "RUN ANALYSIS", False
+                    if u == v:
+                         return no_update, {'text': "Source and target must be different nodes.", "type": "error"}, "RUN ANALYSIS", False
 
                     model = get_cached_model(package_meta, dataset_meta['num_features'], dataset_meta['num_classes'])
 
@@ -4562,8 +4600,10 @@ def run_link_prediction_unified(predict_clicks, global_clicks,
                     return prediction_result, status, "RUN ANALYSIS", False
 
                 except ValueError:
-
                     return no_update, {'text': "Invalid node input (must be integers).", "type": "error"}, "RUN ANALYSIS", False
+
+            # Link mode needs an explicit pair: both source and target are required
+            return no_update, {'text': "Enter both a source and a target node ID, then press RUN ANALYSIS.", "type": "error"}, "RUN ANALYSIS", False
 
         node_idx = None
 
@@ -4914,15 +4954,15 @@ def update_causal_layer3_status(status_data):
     Input('link-cpa-iv-store', 'data'),
     Input('embedding-color-mode', 'value'),
     Input('selected-node-store', 'data'),
+    Input('selected-link-store', 'data'),
     State('precomputed-package-store', 'data'),
     State('full-dataset-store', 'data'),
     State('layer3-tabs', 'value'),
     State('analysis-mode-store', 'data'),
-    State('selected-link-store', 'data'),
     State('link-prediction-store', 'data'),
     prevent_initial_call=True
 )
-def update_mid_layer(n_clicks, predictions_data, cpa_data, link_cpa_data, embedding_color_mode, selected_node, package, dataset, active_layer3_tab, analysis_mode, selected_link, link_prediction_store):
+def update_mid_layer(n_clicks, predictions_data, cpa_data, link_cpa_data, embedding_color_mode, selected_node, selected_link, package, dataset, active_layer3_tab, analysis_mode, link_prediction_store):
     try:
         empty_fig = empty_figure("Loading model…")
         gnn_style = {'flex': '0.8', 'minWidth': '260px', 'minHeight': '0', 'height': '100%', 'maxHeight': '100%',
@@ -4948,6 +4988,9 @@ def update_mid_layer(n_clicks, predictions_data, cpa_data, link_cpa_data, embedd
             target = selected_link.get('target')
             if target is not None:
                 target_node_id_str = str(target)
+            # mark the link's source with the star (not a node selected in node view)
+            if selected_link.get('source') is not None:
+                selected_node_id_str = str(selected_link['source'])
 
         embeddings_2d = get_2d_embeddings(package)
         if embeddings_2d is None:
