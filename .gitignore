@@ -13,3 +13,6 @@ link_predictions.json
 __pycache__/
 *.pyc
 .claude/
+
+# Test tooling
+.pytest_cache/

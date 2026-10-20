@@ -21,9 +21,15 @@ Quick check after the offline phase: `python test_smoke.py`
 - `gnnvis/models/`: the only definition of the GNN models (`GCNNet`, `GATNet`), the
   model registry, and loading of saved model packages. Training, the precompute scripts
   and the app all use it.
-- `app.py`: the Dash application; `app_stability.py`, `app_expl.py`,
+- `gnnvis/ui/`: the view layer. `theme.py` (class names, colours, empty figures),
+  `components.py` (tiles, cards, placeholders) and `figures/` (embeddings, confusion
+  matrices, subgraph, importance, CPA-IV, attention, full graph, stability): plain
+  functions from data to Plotly figures / Dash components, testable without the app.
+- `app.py`: the Dash layout and callbacks; `app_stability.py`, `app_expl.py`,
   `cpa_iv_link_prediction.py`, `link_prediction_utils.py`: analysis code.
 - `train_models.py`, `precompute_stability.py`, `precompute_link_stability.py`: offline scripts.
+- `tests/`: `python -m pytest` (a few seconds; synthetic graphs, plus checks on the saved
+  models when they are present).
 
 ### Adding a model
 1. Create `gnnvis/models/<name>.py` with a `GNNBase` subclass decorated with
