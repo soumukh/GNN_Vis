@@ -10,6 +10,8 @@ This file only creates the Dash app. The code lives in the ``gnnvis`` package:
     gnnvis/ui/callbacks/    callbacks, one module per feature (registered on import)
     gnnvis/ui/figures/      figure builders; theme.py / components.py: shared look
     gnnvis/config.py        datasets, defaults, model list
+    gnnvis/tasks.py         node / link task objects; gnnvis/explainers/: explainer registry
+    gnnvis/jobs.py          background jobs; gnnvis/stability_cache.py: versioned stability files
 
 Analysis code: app_stability.py, app_expl.py, cpa_iv_link_prediction.py,
 link_prediction_utils.py. Offline scripts: train_models.py, precompute_*.py.
@@ -25,7 +27,7 @@ import warnings
 
 import dash
 
-from app_stability import _scan_link_stability_cache
+from gnnvis.stability_cache import scan as scan_stability_cache
 from gnnvis.ui.layout import build_layout
 
 # Logs contain emoji/arrows: when stdout is redirected on Windows the default
@@ -59,7 +61,7 @@ import gnnvis.ui.callbacks  # noqa: E402,F401
 
 if __name__ == '__main__':
     print("Dash app starting...")
-    _scan_link_stability_cache()
+    scan_stability_cache()
     # Disable the Werkzeug auto-reloader on Windows to avoid select() socket errors
     # (WinError 10038) caused by the reloader thread closing sockets unexpectedly.
     # Bind to localhost by default: debug mode exposes the Werkzeug debugger, which

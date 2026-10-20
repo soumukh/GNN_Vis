@@ -5,7 +5,9 @@
  * data-dash-is-loading="true". This polls for those markers and shows a thin
  * animated bar plus a badge naming the slowest step in progress and the
  * elapsed time. It appears only after a short delay so quick updates do not
- * flicker, and it also disables "Run Stability Analysis" while that runs.
+ * flicker. A background job (e.g. stability analysis) renders a .job-progress
+ * element with a data-label; while one exists the badge shows that label, on
+ * every tab.
  */
 (function () {
     // Highest priority first: the first match names the activity.
@@ -76,20 +78,13 @@
         return ids;
     }
 
-    function setStabilityButton(busy) {
-        var btn = document.getElementById('run-stability-button');
-        if (!btn) return;
-        if (busy && !btn.disabled) { btn.disabled = true; btn.classList.add('is-busy'); }
-        if (!busy && btn.classList.contains('is-busy')) { btn.disabled = false; btn.classList.remove('is-busy'); }
-    }
-
     function tick() {
         if (!bar) build();
         var ids = loadingIds();
         var now = Date.now();
-        setStabilityButton(ids.indexOf('stability-status') !== -1);
+        var job = document.querySelector('.job-progress[data-label]');
 
-        if (ids.length) {
+        if (ids.length || job) {
             idleSince = null;
             if (busySince === null) busySince = now;
             if (!visible && now - busySince >= SHOW_AFTER_MS) {
@@ -97,7 +92,7 @@
                 document.body.classList.add('is-busy');
             }
             if (visible) {
-                labelEl.textContent = currentLabel(ids) + '…';
+                labelEl.textContent = (job ? job.getAttribute('data-label') : currentLabel(ids) + '…');
                 timeEl.textContent = Math.floor((now - busySince) / 1000) + ' s';
             }
         } else {

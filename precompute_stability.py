@@ -11,36 +11,24 @@ Usage:
 import argparse
 import math
 import os
-import pickle
-import sys
 import time
 
 import torch
 from torch_geometric.data import Data
 from torch_geometric.datasets import Planetoid
 
+from gnnvis import stability_cache
 from gnnvis.models import available_models, load_package, load_model, model_capabilities
 
 # ── Path setup ────────────────────────────────────────────────────────────────
 SCRIPT_DIR      = os.path.dirname(os.path.abspath(__file__))
 MODEL_DIR       = os.path.join(SCRIPT_DIR, 'models')
 DATA_DIR        = os.path.join(SCRIPT_DIR, 'data')
-CACHE_DIR       = os.path.join(SCRIPT_DIR, 'stability_cache')
-os.makedirs(CACHE_DIR, exist_ok=True)
 
 device = torch.device('cpu')
 
 # Models come from gnnvis/models (the single definition shared with the app);
 # the stability computation itself lives in app_stability.py.
-
-
-def cache_key(dataset_name, model_type, sigma):
-    return f"{dataset_name.lower()}_{model_type.lower()}_{sigma}"
-
-
-def cache_path(key):
-    filename = f"stability_{key.replace('.', '_').replace(' ', '_')}.pkl"
-    return os.path.join(CACHE_DIR, filename)
 
 
 # ── Core stability computation (shared with the app) ─────────────────────────
@@ -73,7 +61,7 @@ def main():
                         help='Default: every registered model that supports stability analysis')
     parser.add_argument('--sigmas',   nargs='+', type=float, default=[0.01, 0.05, 0.1])
     parser.add_argument('--force',    action='store_true',
-                        help='Recompute even if cache already exists')
+                        help='Recompute even if a valid cache file exists')
     args = parser.parse_args()
 
     combos = [(d, m, s) for d in args.datasets
@@ -83,17 +71,10 @@ def main():
     print(f"\nPrecomputing stability for {len(combos)} combinations …\n")
 
     for dataset_name, model_type, sigma in combos:
-        key  = cache_key(dataset_name, model_type, sigma)
-        path = cache_path(key)
-
-        print(f"-- {dataset_name} / {model_type} / sigma={sigma}  (key={key})")
+        print(f"-- {dataset_name} / {model_type} / sigma={sigma}")
 
         if not model_capabilities(model_type)['stability']:
             print(f"  [SKIP] Stability analysis is not supported for {model_type}\n")
-            continue
-
-        if os.path.exists(path) and not args.force:
-            print(f"  Already cached — skipping. (use --force to recompute)\n")
             continue
 
         # Load package
@@ -126,6 +107,18 @@ def main():
         data_obj = Data(x=data.x, edge_index=data.edge_index,
                         y=data.y, num_nodes=data.num_nodes)
 
+        # Skip only if the existing file was produced by this model
+        fingerprint = stability_cache.model_fingerprint(package)
+        if not args.force:
+            _, state, _ = stability_cache.load(
+                stability_cache.NODE, dataset_name, model_type, sigma, fingerprint,
+                verify=lambda r: stability_cache.node_results_match(model, data_obj, r))
+            if state in (stability_cache.HIT, stability_cache.STAMPED):
+                print("  Already cached and up to date — skipping. (use --force to recompute)\n")
+                continue
+            if state == stability_cache.STALE:
+                print("  Cached file is out of date (model changed) — recomputing.")
+
         print(f"  nodes={data.num_nodes}  features={data.num_features}  "
               f"classes={ds.num_classes}  edges={data.edge_index.shape[1]}")
         print(f"  Computing from scratch …", flush=True)
@@ -140,8 +133,7 @@ def main():
 
         safe = sanitise(results)
 
-        with open(path, 'wb') as f:
-            pickle.dump(safe, f)
+        path = stability_cache.save(stability_cache.NODE, dataset_name, model_type, sigma, fingerprint, safe)
 
         avg_s = sum(r.get('stability', 0) or 0 for r in safe) / len(safe)
         n_ok  = sum(1 for r in safe if r.get('correct'))

@@ -303,7 +303,15 @@ body {
 }
 body.is-busy .activity-bar { opacity: 1; }
 body.is-busy .activity-badge { opacity: 1; transform: translate(-50%, 0); }
-#run-stability-button.is-busy { opacity: 0.6; cursor: wait !important; }
+#run-stability-button:disabled { opacity: 0.6; cursor: wait !important; }
+
+/* Background job progress (stability tab) */
+.job-panel { align-items: center; gap: 12px; margin: -4px 0 12px; }
+.job-progress { display: flex; flex-direction: column; gap: 4px; min-width: 320px; }
+.job-progress-track { height: 6px; background: #e9ecef; border-radius: 3px; overflow: hidden; }
+.job-progress-fill { height: 100%; background: #17a2b8; transition: width 0.4s ease; }
+.job-progress-text { font-size: 12px; color: #555; }
+.job-cancel { height: 28px; line-height: 26px; padding: 0 12px; font-size: 11px; }
 @keyframes activity-slide { 0% { background-position: -40% 0; } 100% { background-position: 140% 0; } }
 @keyframes activity-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) {

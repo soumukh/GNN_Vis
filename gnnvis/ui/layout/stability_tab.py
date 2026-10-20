@@ -169,6 +169,13 @@ def stability_tab():
                                      children=" "),
                         ]),
 
+                        # Progress of a running (background) stability job
+                        html.Div(id=ids.STABILITY_JOB_PANEL, className='job-panel', style={'display': 'none'}, children=[
+                            html.Div(id=ids.STABILITY_PROGRESS),
+                            html.Button('Cancel', id=ids.STABILITY_CANCEL_BUTTON, n_clicks=0, className='job-cancel'),
+                        ]),
+                        dcc.Interval(id=ids.STABILITY_JOB_POLL, interval=1000, disabled=True),
+
                         html.Div(className='help-line', children=[
                             html.B("Stability S"), " = Jaccard overlap of the top-10 explanation edges before and after adding noise σ "
                             "(1 = identical explanation, 0 = no overlap). ",

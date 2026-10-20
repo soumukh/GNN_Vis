@@ -1,11 +1,12 @@
 """
-Stability backend helpers extracted from app.py.
-Contains cache helpers, node/link stability compute routines and fast prediction-consistency routine.
+Stability analyses shared by the app and the precompute scripts: node and link
+GNNExplainer stability, and the fast prediction-consistency routine.
+
+The node and link analyses take an optional ``progress(done, total)`` callable,
+called before each node / edge and once at the end; it may raise to stop the
+run (gnnvis/jobs.py uses this for cancelling).
 """
 
-import os
-import pickle
-import pandas as pd
 import numpy as np
 import torch
 
@@ -13,125 +14,7 @@ from gnnvis.explainers.gnnexplainer import (
     STABILITY_EPOCHS, LinkLogit, edge_mask, link_mask_explainer, model_device, node_mask_explainer,
 )
 
-STABILITY_CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'stability_cache')
-os.makedirs(STABILITY_CACHE_DIR, exist_ok=True)
-
-
-def get_stability_cache_key(dataset_name: str, model_type: str, sigma: float) -> str:
-    return f"{dataset_name.lower()}_{model_type.lower()}_{sigma}"
-
-
-def get_stability_cache_path(cache_key: str) -> str:
-    filename = f"stability_{cache_key.replace('.', '_').replace(' ', '_')}.pkl"
-    return os.path.join(STABILITY_CACHE_DIR, filename)
-
-
-def load_stability_cache(cache_key: str):
-    path = get_stability_cache_path(cache_key)
-    if os.path.exists(path):
-        try:
-            with open(path, 'rb') as f:
-                data = pickle.load(f)
-            print(f"[STABILITY CACHE] Loaded from cache: {path}")
-            return data
-        except Exception as e:
-            print(f"[STABILITY CACHE] Failed to read cache ({path}): {e} — recomputing.")
-            return None
-    return None
-
-
-def save_stability_cache(cache_key: str, results: list) -> None:
-    path = get_stability_cache_path(cache_key)
-    try:
-        with open(path, 'wb') as f:
-            pickle.dump(results, f)
-        print(f"[STABILITY CACHE] Saved to cache: {path}")
-    except Exception as e:
-        print(f"[STABILITY CACHE] Failed to save cache ({path}): {e}")
-
-
-# Link-stability (parquet preferred) helpers
-
-def get_link_stability_cache_key(dataset_name: str, model_type: str, sigma: float) -> str:
-    return f"link_{dataset_name.lower()}_{model_type.lower()}_{sigma}"
-
-
-def get_link_stability_cache_path(cache_key: str) -> str:
-    fname = f"stability_{cache_key.replace('.', '_').replace(' ', '_')}.parquet"
-    return os.path.join(STABILITY_CACHE_DIR, fname)
-
-
-def load_link_stability_cache(cache_key: str):
-    stem = f"stability_{cache_key.replace('.', '_').replace(' ', '_')}"
-    parquet_path = os.path.join(STABILITY_CACHE_DIR, stem + '.parquet')
-    pkl_path     = os.path.join(STABILITY_CACHE_DIR, stem + '.pkl')
-
-    if os.path.exists(parquet_path):
-        try:
-            df = pd.read_parquet(parquet_path)
-            results = df.to_dict('records')
-            print(f"[LINK STABILITY CACHE] Loaded parquet ({len(results)} edges): {parquet_path}")
-            return results
-        except Exception as e:
-            print(f"[LINK STABILITY CACHE] Parquet read failed ({parquet_path}): {e}")
-
-    if os.path.exists(pkl_path):
-        try:
-            with open(pkl_path, 'rb') as f:
-                data = pickle.load(f)
-            print(f"[LINK STABILITY CACHE] Loaded pkl ({len(data)} edges): {pkl_path}")
-            return data
-        except Exception as e:
-            print(f"[LINK STABILITY CACHE] Pkl read failed ({pkl_path}): {e}")
-
-    return None
-
-
-def save_link_stability_cache(cache_key: str, results: list) -> None:
-    parquet_path = get_link_stability_cache_path(cache_key)
-    try:
-        pd.DataFrame(results).to_parquet(parquet_path, index=False)
-        print(f"[LINK STABILITY CACHE] Saved parquet ({len(results)} edges): {parquet_path}")
-    except Exception as e:
-        print(f"[LINK STABILITY CACHE] Parquet save failed: {e}  — trying pkl")
-        pkl_path = parquet_path.replace('.parquet', '.pkl')
-        try:
-            with open(pkl_path, 'wb') as f:
-                pickle.dump(results, f)
-            print(f"[LINK STABILITY CACHE] Saved pkl (fallback): {pkl_path}")
-        except Exception as e2:
-            print(f"[LINK STABILITY CACHE] Both save methods failed: {e2}")
-
-
-def link_stability_cache_exists(dataset_name: str, model_type: str, sigma: float) -> bool:
-    key  = get_link_stability_cache_key(dataset_name, model_type, sigma)
-    stem = f"stability_{key.replace('.', '_').replace(' ', '_')}"
-    return (
-        os.path.exists(os.path.join(STABILITY_CACHE_DIR, stem + '.parquet')) or
-        os.path.exists(os.path.join(STABILITY_CACHE_DIR, stem + '.pkl'))
-    )
-
-
-def _scan_link_stability_cache() -> None:
-    files = [f for f in os.listdir(STABILITY_CACHE_DIR)
-             if f.startswith('stability_link_') and (f.endswith('.parquet') or f.endswith('.pkl'))]
-    if not files:
-        print("[LINK STABILITY CACHE] No precomputed files found in stability_cache/")
-        print("  Run:  python precompute_link_stability.py")
-        return
-    print(f"[LINK STABILITY CACHE] {len(files)} precomputed file(s) available:")
-    for fname in sorted(files):
-        fpath = os.path.join(STABILITY_CACHE_DIR, fname)
-        size_kb = os.path.getsize(fpath) // 1024
-        try:
-            if fname.endswith('.parquet'):
-                n = len(pd.read_parquet(fpath))
-            else:
-                with open(fpath, 'rb') as fh:
-                    n = len(pickle.load(fh))
-            print(f"  ✓ {fname}  ({n} edges, {size_kb} KB)")
-        except Exception:
-            print(f"  ? {fname}  ({size_kb} KB, unreadable)")
+# Caches of these results: gnnvis/stability_cache.py
 
 
 # Device
@@ -146,7 +29,8 @@ _LinkPredWrapper = LinkLogit
 
 # Node-level explainer stability
 
-def run_stability_analysis(model, data, predictions_data, sigma, sample_size, seed=42, progress_every=0):
+def run_stability_analysis(model, data, predictions_data, sigma, sample_size, seed=42, progress_every=0,
+                           progress=None):
     """Node-level GNNExplainer top-k Jaccard stability.
 
     This is the single implementation used by both the app and
@@ -189,6 +73,8 @@ def run_stability_analysis(model, data, predictions_data, sigma, sample_size, se
     skip_reasons = {}
 
     for i, node_idx in enumerate(sample_nodes):
+        if progress:
+            progress(i, n_sample)
         node_idx = int(node_idx)
         try:
             target_cls = int(preds[node_idx])
@@ -250,6 +136,8 @@ def run_stability_analysis(model, data, predictions_data, sigma, sample_size, se
             _tb.print_exc()
             continue
 
+    if progress:
+        progress(n_sample, n_sample)
     return results
 
 
@@ -349,7 +237,8 @@ def run_prediction_consistency_stability(model, data, predictions_data, sigma,
 
 # Per-edge stability
 
-def run_link_stability_analysis(model, data, sigma: float, sample_size: int, seed=42, progress_every=25):
+def run_link_stability_analysis(model, data, sigma: float, sample_size: int, seed=42, progress_every=25,
+                                progress=None):
     """
     Per-edge stability routine. Returns list of dicts with keys:
         source, target, confidence, stability, degree_sum, common_neighbors, correct
@@ -414,6 +303,8 @@ def run_link_stability_analysis(model, data, sigma: float, sample_size: int, see
     skip_reasons = {}
 
     for i, (u, v) in enumerate(sampled):
+        if progress:
+            progress(i, len(sampled))
         try:
             conf = float(confs[i])
             correct = conf > 0.5
@@ -459,6 +350,8 @@ def run_link_stability_analysis(model, data, sigma: float, sample_size: int, see
             if n_fail <= 3:
                 _tb.print_exc()
 
+    if progress:
+        progress(len(sampled), len(sampled))
     print(f"[LINK STABILITY] Done — {n_ok} ok / {n_fail} failed")
     if skip_reasons:
         print(f"[LINK STABILITY] Failures: {skip_reasons}")

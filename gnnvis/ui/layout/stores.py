@@ -47,6 +47,7 @@ def stores():
         dcc.Store(id=ids.CM_DETAIL_PAGING_STORE, data=None),
 
         dcc.Store(id=ids.STABILITY_RESULTS_STORE, data=None),
+        dcc.Store(id=ids.STABILITY_JOB_STORE, data=None),
 
         dcc.Store(id=ids.DRILLDOWN_CLICK_STORE, data=None),
 

@@ -28,32 +28,24 @@ Columns: source, target, confidence, stability, degree_sum, common_neighbors, co
 import argparse
 import math
 import os
-import pickle
 import time
 
-import numpy as np
 import pandas as pd
 import torch
 from torch_geometric.data import Data
 
+from gnnvis import stability_cache
 from gnnvis.models import available_models, load_package, load_model, model_capabilities
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_DIR  = os.path.join(SCRIPT_DIR, 'models')
 DATA_DIR   = os.path.join(SCRIPT_DIR, 'data')
-CACHE_DIR  = os.path.join(SCRIPT_DIR, 'stability_cache')
-os.makedirs(CACHE_DIR, exist_ok=True)
+CACHE_DIR  = stability_cache.CACHE_DIR
 
 
 # Models come from gnnvis/models (the single definition shared with the app);
 # the stability computation itself lives in app_stability.py.
-
-
-def parquet_path(dataset_name: str, model_type: str, sigma: float) -> str:
-    key   = f"link_{dataset_name.lower()}_{model_type.lower()}_{sigma}"
-    fname = f"stability_{key.replace('.', '_')}.parquet"
-    return os.path.join(CACHE_DIR, fname)
 
 
 def _safe(v):
@@ -84,7 +76,7 @@ def main() -> None:
                         help='Default: every registered model that supports stability analysis')
     parser.add_argument('--sigmas',   nargs='+', type=float, default=[0.01, 0.05, 0.1])
     parser.add_argument('--force',    action='store_true',
-                        help='Recompute even if parquet already exists')
+                        help='Recompute even if a valid parquet file exists')
     args = parser.parse_args()
 
     combos = [(d, m, s) for d in args.datasets
@@ -98,19 +90,10 @@ def main() -> None:
     from torch_geometric.datasets import Planetoid
 
     for dataset_name, model_type, sigma in combos:
-        out = parquet_path(dataset_name, model_type, sigma)
         print(f"── {dataset_name} / {model_type} / σ={sigma}")
-        print(f"   {out}")
 
         if not model_capabilities(model_type)['stability']:
             print(f"  [SKIP] Stability analysis is not supported for {model_type}\n")
-            continue
-
-        if os.path.exists(out) and not args.force:
-            df_check = pd.read_parquet(out)
-            avg = df_check['stability'].dropna().mean()
-            print(f"   Already cached — {len(df_check)} edges, "
-                  f"avg S={avg:.3f}  (--force to recompute)\n")
             continue
 
         # Load the model package the app uses (models/*_tuned.pkl)
@@ -133,6 +116,20 @@ def main() -> None:
             print(f"  [SKIP] Model build failed: {e}\n")
             continue
 
+        # Skip only if the existing file was produced by this model
+        fingerprint = stability_cache.model_fingerprint(pkg)
+        if not args.force:
+            cached, state, _ = stability_cache.load(
+                stability_cache.LINK, dataset_name, model_type, sigma, fingerprint,
+                verify=lambda r: stability_cache.link_results_match(model, data, r))
+            if state in (stability_cache.HIT, stability_cache.STAMPED):
+                avg = pd.DataFrame(cached)['stability'].dropna().mean()
+                print(f"   Already cached and up to date — {len(cached)} edges, "
+                      f"avg S={avg:.3f}  (--force to recompute)\n")
+                continue
+            if state == stability_cache.STALE:
+                print("   Cached file is out of date (model changed) — recomputing.")
+
         print(f"  nodes={data.num_nodes}  features={data.num_features}  "
               f"classes={ds.num_classes}  edges={data.edge_index.shape[1]}")
         print(f"  Starting computation …\n", flush=True)
@@ -151,7 +148,8 @@ def main() -> None:
             print(f"  [WARN] Empty DataFrame — nothing saved.\n")
             continue
 
-        df.to_parquet(out, index=False)
+        out = stability_cache.save(stability_cache.LINK, dataset_name, model_type, sigma, fingerprint,
+                                   df.to_dict('records'))
 
         avg_s = float(df['stability'].dropna().mean())
         n_ok  = int(df['correct'].sum())

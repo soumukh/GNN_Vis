@@ -36,6 +36,14 @@ Quick check after the offline phase: `python test_smoke.py`
 - `gnnvis/ui/callbacks/`: the Dash callbacks, one module per feature (session, selection,
   explanation, overview, link, full graph, stability); importing the package registers them.
 - `gnnvis/runtime.py`: device, paths, caches of model packages / datasets / models, locks.
+- `gnnvis/jobs.py`: background jobs with progress and cancel. A stability run that is not
+  precomputed runs as a job; the Stability tab shows its progress and remaining time and
+  has a Cancel button.
+- `gnnvis/stability_cache.py`: the precomputed stability files in `stability_cache/`. Each
+  has a `.meta.json` sidecar with a fingerprint of the model weights, so results computed
+  for an older model (e.g. before retraining) are detected as out of date and not shown.
+  Files from before the sidecars existed are checked against the current model on first
+  use and stamped if they match.
 - `gnnvis/ui/ids.py`: every component id as a constant; layout and callbacks use these,
   and `tests/test_ids.py` fails if a callback references a component that never exists.
 - `app.py`: the entry point (creates the app, attaches the layout, registers callbacks); `app_stability.py`, `app_expl.py`,
@@ -52,6 +60,11 @@ Quick check after the offline phase: `python test_smoke.py`
 
 The app's model dropdown, the attention panel and the stability tab follow the
 registry and the model's capabilities; no other code needs to know its name.
+
+### Stability caches after retraining
+After retraining a model, run `python precompute_stability.py` (and
+`python precompute_link_stability.py` for link stability). They recompute only the
+files that are missing or out of date for the current models; `--force` recomputes all.
 
 ### Adding an explainer
 Write `fn(model, data, target, **options)` (`target` is a node index, or a
