@@ -17,5 +17,22 @@ The server binds to 127.0.0.1 with debug mode on. To serve on your network, set
 
 Quick check after the offline phase: `python test_smoke.py`
 
+## Code layout
+- `gnnvis/models/`: the only definition of the GNN models (`GCNNet`, `GATNet`), the
+  model registry, and loading of saved model packages. Training, the precompute scripts
+  and the app all use it.
+- `app.py`: the Dash application; `app_stability.py`, `app_expl.py`,
+  `cpa_iv_link_prediction.py`, `link_prediction_utils.py`: analysis code.
+- `train_models.py`, `precompute_stability.py`, `precompute_link_stability.py`: offline scripts.
+
+### Adding a model
+1. Create `gnnvis/models/<name>.py` with a `GNNBase` subclass decorated with
+   `@register_model("NAME", attention=..., stability=...)` and import it in
+   `gnnvis/models/__init__.py`.
+2. Add its hyperparameters to `MODEL_CONFIGS` in `train_models.py` and train it.
+
+The app's model dropdown, the attention panel and the stability tab follow the
+registry and the model's capabilities; no other code needs to know its name.
+
 
 For better performance GPU should be utilized

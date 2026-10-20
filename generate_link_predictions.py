@@ -1,7 +1,7 @@
 import os
 import torch
 from torch_geometric.datasets import Planetoid
-from run_specific_cpa import instantiate_model, load_precomputed_package
+from gnnvis.models import load_package, load_model
 from link_prediction_utils import create_link_prediction_candidates, get_top_k_predictions
 
 MODEL = 'GCN'
@@ -14,7 +14,7 @@ import traceback
 
 def main():
     print(f"Generating top-{TOP_K} link predictions for {MODEL}/{DATASET}")
-    package = load_precomputed_package(MODEL, DATASET)
+    package = load_package(MODEL, DATASET)
     if not package:
         print('No package found; aborting')
         return 1
@@ -23,10 +23,7 @@ def main():
     # and importing app would build the whole Dash UI)
     dataset = Planetoid(root=DATA_DIR, name=DATASET)
     data = dataset[0]
-    model = instantiate_model(package, MODEL, dataset.num_node_features, dataset.num_classes)
-    if not model:
-        print('Failed to instantiate model; aborting')
-        return 1
+    model = load_model(package, MODEL, dataset.num_node_features, dataset.num_classes, device='cpu')
 
     model.eval()
     try:

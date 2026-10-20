@@ -34,148 +34,20 @@ import time
 import numpy as np
 import pandas as pd
 import torch
-import torch.nn.functional as F
-from torch_geometric.nn import GCNConv, GATConv
 from torch_geometric.data import Data
-from torch_geometric.explain import Explainer, GNNExplainer
+
+from gnnvis.models import available_models, load_package, load_model, model_capabilities
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_DIR  = os.path.join(SCRIPT_DIR, 'models')
-LP_DIR     = os.path.join(MODEL_DIR, 'link_prediction')
 DATA_DIR   = os.path.join(SCRIPT_DIR, 'data')
 CACHE_DIR  = os.path.join(SCRIPT_DIR, 'stability_cache')
 os.makedirs(CACHE_DIR, exist_ok=True)
 
 
-# ── Model definitions — must mirror app.py exactly ──────────────────
-
-class GCNNet(torch.nn.Module):
-    def __init__(self, in_channels, hidden_channels, out_channels,
-                 dropout_rate=0.5, enable_link_prediction=False, **kwargs):
-        super().__init__()
-        self.conv1 = GCNConv(in_channels, hidden_channels)
-        self.conv2 = GCNConv(hidden_channels, out_channels)
-        self.dropout_rate = dropout_rate
-        self.enable_link_prediction = enable_link_prediction
-        if enable_link_prediction:
-            self.link_predictor = torch.nn.Sequential(
-                torch.nn.Linear(hidden_channels * 2, hidden_channels),
-                torch.nn.ReLU(),
-                torch.nn.Dropout(dropout_rate),
-                torch.nn.Linear(hidden_channels, 1),
-            )
-
-    def forward(self, x, edge_index, edge_weight=None, return_embeddings=False, **kwargs):
-        h = F.relu(self.conv1(x, edge_index, edge_weight=edge_weight))
-        h = F.dropout(h, p=self.dropout_rate, training=self.training)
-        out = self.conv2(h, edge_index, edge_weight=edge_weight)
-        log_probs = F.log_softmax(out, dim=1)
-        return (log_probs, h) if return_embeddings else log_probs
-
-    def predict_links(self, emb, edge_index):
-        if not self.enable_link_prediction:
-            raise ValueError("enable_link_prediction=False")
-        src = emb[edge_index[0]]
-        tgt = emb[edge_index[1]]
-        return self.link_predictor(torch.cat([src, tgt], dim=1)).squeeze()
-
-
-class GATNet(torch.nn.Module):
-    def __init__(self, in_channels, hidden_channels, out_channels,
-                 heads=8, dropout_rate=0.6, enable_link_prediction=False, **kwargs):
-        super().__init__()
-        self.conv1 = GATConv(in_channels, hidden_channels, heads=heads, dropout=dropout_rate)
-        self.conv2 = GATConv(hidden_channels * heads, out_channels, heads=1,
-                             concat=False, dropout=dropout_rate)
-        self.dropout_rate = dropout_rate
-        self.enable_link_prediction = enable_link_prediction
-        if enable_link_prediction:
-            self.link_predictor = torch.nn.Sequential(
-                torch.nn.Linear(hidden_channels * heads * 2, hidden_channels * heads),
-                torch.nn.ReLU(),
-                torch.nn.Dropout(dropout_rate),
-                torch.nn.Linear(hidden_channels * heads, 1),
-            )
-
-    def forward(self, x, edge_index, return_embeddings=False, **kwargs):
-        x = F.dropout(x, p=self.dropout_rate, training=self.training)
-        h = F.elu(self.conv1(x, edge_index))
-        h = F.dropout(h, p=self.dropout_rate, training=self.training)
-        out = self.conv2(h, edge_index)
-        log_probs = F.log_softmax(out, dim=1)
-        return (log_probs, h) if return_embeddings else log_probs
-
-    def predict_links(self, emb, edge_index):
-        if not self.enable_link_prediction:
-            raise ValueError("enable_link_prediction=False")
-        src = emb[edge_index[0]]
-        tgt = emb[edge_index[1]]
-        return self.link_predictor(torch.cat([src, tgt], dim=1)).squeeze()
-
-
-# ── GNNExplainer wrapper — dot-product or dedicated head ─────────────────────
-
-class _LinkDotWrapper(torch.nn.Module):
-    """Wraps the base GNN for GNNExplainer.
-    Returns the raw logit [1,1] for edge (src→dst) using dot product or
-    the model's link_predictor head if available."""
-
-    def __init__(self, base_model, src: int, dst: int):
-        super().__init__()
-        self.base_model = base_model
-        self.src = int(src)
-        self.dst = int(dst)
-
-    def forward(self, x, edge_index, **kwargs):
-        _, emb = self.base_model(x, edge_index, return_embeddings=True)
-        if getattr(self.base_model, 'enable_link_prediction', False):
-            ep    = torch.tensor([[self.src], [self.dst]], device=x.device, dtype=torch.long)
-            score = self.base_model.predict_links(emb, ep)
-        else:
-            score = (emb[self.src] * emb[self.dst]).sum()
-        return score.view(1, 1)  # raw logit: explainer uses return_type='raw'
-
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-def load_lp_package(model_type: str, dataset_name: str) -> dict | None:
-    # Must be the same package the app loads: the cache key
-    # (dataset/model/sigma) does not record which weights produced the file.
-    path = os.path.join(MODEL_DIR, f"{model_type}_{dataset_name}_tuned.pkl")
-    if not os.path.exists(path):
-        print(f"  [SKIP] Package not found: {path}")
-        return None
-    with open(path, 'rb') as f:
-        return pickle.load(f)
-
-
-def build_model(package: dict, model_type: str, num_features: int, num_classes: int):
-    args = dict(package.get('model_init_args', {}))
-    if model_type == 'GCN':
-        model = GCNNet(in_channels=num_features, out_channels=num_classes, **args)
-    elif model_type == 'GAT':
-        model = GATNet(in_channels=num_features, out_channels=num_classes, **args)
-    else:
-        raise ValueError(f"Unknown model_type: {model_type}")
-    sd = {k: torch.tensor(v) if isinstance(v, list) else v
-          for k, v in package.get('model_state_dict', {}).items()}
-    model.load_state_dict(sd, strict=False)
-    model.eval()
-    return model
-
-
-def get_edge_mask(exp) -> np.ndarray | None:
-    for attr in ('edge_mask', '_edge_mask', 'edge_weight', '_edge_weight'):
-        val = getattr(exp, attr, None)
-        if val is not None:
-            return val.detach().cpu().numpy()
-    if hasattr(exp, 'to_dict'):
-        d = exp.to_dict()
-        for k in ('edge_mask', 'edge_weight'):
-            if k in d and d[k] is not None:
-                return d[k].detach().cpu().numpy()
-    return None
+# Models come from gnnvis/models (the single definition shared with the app);
+# the stability computation itself lives in app_stability.py.
 
 
 def parquet_path(dataset_name: str, model_type: str, sigma: float) -> str:
@@ -207,7 +79,9 @@ def main() -> None:
         description="Precompute link-stability cache (parquet)")
     parser.add_argument('--datasets', nargs='+', default=['Cora', 'CiteSeer'],
                         help='Dataset names matching models/*_tuned.pkl filenames')
-    parser.add_argument('--models',   nargs='+', default=['GCN', 'GAT'])
+    parser.add_argument('--models',   nargs='+',
+                        default=[m for m in available_models() if model_capabilities(m)['stability']],
+                        help='Default: every registered model that supports stability analysis')
     parser.add_argument('--sigmas',   nargs='+', type=float, default=[0.01, 0.05, 0.1])
     parser.add_argument('--force',    action='store_true',
                         help='Recompute even if parquet already exists')
@@ -228,6 +102,10 @@ def main() -> None:
         print(f"── {dataset_name} / {model_type} / σ={sigma}")
         print(f"   {out}")
 
+        if not model_capabilities(model_type)['stability']:
+            print(f"  [SKIP] Stability analysis is not supported for {model_type}\n")
+            continue
+
         if os.path.exists(out) and not args.force:
             df_check = pd.read_parquet(out)
             avg = df_check['stability'].dropna().mean()
@@ -235,8 +113,8 @@ def main() -> None:
                   f"avg S={avg:.3f}  (--force to recompute)\n")
             continue
 
-        # Load link-prediction model package
-        pkg = load_lp_package(model_type, dataset_name)
+        # Load the model package the app uses (models/*_tuned.pkl)
+        pkg = load_package(model_type, dataset_name, MODEL_DIR)
         if pkg is None:
             print()
             continue
@@ -249,9 +127,8 @@ def main() -> None:
             print(f"  [SKIP] Dataset load failed: {e}\n")
             continue
 
-        # Instantiate model (dot-product mode; no link prediction head required)
         try:
-            model = build_model(pkg, model_type, data.num_features, ds.num_classes)
+            model = load_model(pkg, model_type, data.num_features, ds.num_classes, device='cpu')
         except Exception as e:
             print(f"  [SKIP] Model build failed: {e}\n")
             continue

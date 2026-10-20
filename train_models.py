@@ -2,7 +2,6 @@ import torch
 import torch.nn.functional as F
 import torch.optim as optim
 from torch_geometric.datasets import Planetoid
-from torch_geometric.nn import GCNConv, GATConv
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 import os
 import pickle
@@ -13,6 +12,7 @@ from sklearn.decomposition import PCA
 import umap.umap_ as umap
 import warnings
 from link_prediction_utils import create_edge_splits, evaluate_link_prediction, generate_negative_samples
+from gnnvis.models import build_model, model_capabilities
 
 # --- Configuration ---
 MODEL_DIR = 'models'
@@ -41,6 +41,9 @@ GAT_CONFIG = {
     'CiteSeer': {'lr': 0.005, 'weight_decay': 5e-4, 'hidden_channels': 8, 'heads': 8, 'dropout_rate': 0.6, 'enable_link_prediction': True, 'link_pred_weight': 0.3}
 }
 
+# Hyperparameters per registered model type (see gnnvis/models)
+MODEL_CONFIGS = {'GCN': GCN_CONFIG, 'GAT': GAT_CONFIG}
+
 # --- GPU Device Setup ---
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Using device: {device}")
@@ -58,137 +61,8 @@ os.makedirs(data_abs_dir, exist_ok=True)
 os.makedirs(processed_data_abs_dir, exist_ok=True)
 
 # --- Model Definitions ---
-class GCNNet(torch.nn.Module):
-    """A standard two-layer GCN model with an inference method."""
-    def __init__(self, in_channels, hidden_channels, out_channels, dropout_rate=0.5, enable_link_prediction=False):
-        super().__init__()
-        # No cached=True: the model is trained on the link-prediction training
-        # graph but evaluated / pre-computed on the full graph. A cached GCNConv
-        # would silently keep reusing the first graph's normalised adjacency.
-        self.conv1 = GCNConv(in_channels, hidden_channels)
-        self.conv2 = GCNConv(hidden_channels, out_channels)
-        self.dropout_rate = dropout_rate
-        self.enable_link_prediction = enable_link_prediction
-        self.init_args = {'hidden_channels': hidden_channels, 'dropout_rate': dropout_rate, 'enable_link_prediction': enable_link_prediction}
-        
-        # Link prediction head
-        if enable_link_prediction:
-            self.link_predictor = torch.nn.Sequential(
-                torch.nn.Linear(hidden_channels * 2, hidden_channels),
-                torch.nn.ReLU(),
-                torch.nn.Dropout(dropout_rate),
-                torch.nn.Linear(hidden_channels, 1)
-            )
-
-    def forward(self, x, edge_index, return_embeddings=False):
-        x = F.relu(self.conv1(x, edge_index))
-        x = F.dropout(x, p=self.dropout_rate, training=self.training)
-        embeddings = x  # Capture embeddings for link prediction
-        x = self.conv2(x, edge_index)
-        node_output = F.log_softmax(x, dim=1)
-        
-        if return_embeddings:
-            return node_output, embeddings
-        return node_output
-    
-    def predict_links(self, embeddings, edge_index):
-        """Predict link scores for given edge pairs."""
-        if not self.enable_link_prediction:
-            raise ValueError("Link prediction not enabled for this model")
-        
-        # Get embeddings for source and target nodes
-        source_emb = embeddings[edge_index[0]]
-        target_emb = embeddings[edge_index[1]]
-        
-        # Concatenate embeddings
-        edge_features = torch.cat([source_emb, target_emb], dim=1)
-        
-        # Predict link scores
-        link_scores = self.link_predictor(edge_features)
-        return link_scores.squeeze()
-
-    @torch.no_grad()
-    def inference(self, data):
-        """Full forward pass to get embeddings and final predictions."""
-        self.eval()
-        x, edge_index = data.x, data.edge_index
-        x = F.relu(self.conv1(x, edge_index))
-        embeddings = x  # Capture embeddings from the hidden layer
-        x = self.conv2(x, edge_index)
-        log_probs = F.log_softmax(x, dim=1)
-        return log_probs, embeddings
-
-class GATNet(torch.nn.Module):
-    """A standard two-layer GAT model with an inference method."""
-    def __init__(self, in_channels, hidden_channels, out_channels, heads=8, dropout_rate=0.6, enable_link_prediction=False):
-        super().__init__()
-        self.conv1 = GATConv(in_channels, hidden_channels, heads=heads, dropout=dropout_rate)
-        self.conv2 = GATConv(hidden_channels * heads, out_channels, heads=1, concat=False, dropout=dropout_rate)
-        self.dropout_rate = dropout_rate
-        self.enable_link_prediction = enable_link_prediction
-        self.init_args = {'hidden_channels': hidden_channels, 'heads': heads, 'dropout_rate': dropout_rate, 'enable_link_prediction': enable_link_prediction}
-        
-        # Link prediction head
-        if enable_link_prediction:
-            self.link_predictor = torch.nn.Sequential(
-                torch.nn.Linear(hidden_channels * heads * 2, hidden_channels * heads),
-                torch.nn.ReLU(),
-                torch.nn.Dropout(dropout_rate),
-                torch.nn.Linear(hidden_channels * heads, 1)
-            )
-
-    def forward(self, x, edge_index, return_embeddings=False):
-        x = F.dropout(x, p=self.dropout_rate, training=self.training)
-        x = F.elu(self.conv1(x, edge_index))
-        x = F.dropout(x, p=self.dropout_rate, training=self.training)
-        embeddings = x  # Capture embeddings for link prediction
-        x = self.conv2(x, edge_index)
-        node_output = F.log_softmax(x, dim=1)
-        
-        if return_embeddings:
-            return node_output, embeddings
-        return node_output
-    
-    def predict_links(self, embeddings, edge_index):
-        """Predict link scores for given edge pairs."""
-        if not self.enable_link_prediction:
-            raise ValueError("Link prediction not enabled for this model")
-        
-        # Get embeddings for source and target nodes
-        source_emb = embeddings[edge_index[0]]
-        target_emb = embeddings[edge_index[1]]
-        
-        # Concatenate embeddings
-        edge_features = torch.cat([source_emb, target_emb], dim=1)
-        
-        # Predict link scores
-        link_scores = self.link_predictor(edge_features)
-        return link_scores.squeeze()
-
-    @torch.no_grad()
-    def inference(self, data, return_attention_weights=False):
-        """Full forward pass to get embeddings, predictions, and optionally attention."""
-        self.eval()
-        x, edge_index = data.x, data.edge_index
-        
-        # We need to pass through dropout during inference if we want to match training behavior, but it's often disabled.
-        # For simplicity in pre-computation, we will match the forward pass logic.
-        x = F.dropout(x, p=self.dropout_rate, training=self.training) # Note: self.training will be False
-        x, att1 = self.conv1(x, edge_index, return_attention_weights=True)
-        x = F.elu(x)
-        embeddings = x # Capture embeddings from the hidden layer
-        
-        x = F.dropout(x, p=self.dropout_rate, training=self.training)
-        x, att2 = self.conv2(x, edge_index, return_attention_weights=True)
-        
-        log_probs = F.log_softmax(x, dim=1)
-        attention_weights = (att1, att2)
-        
-        if return_attention_weights:
-            return log_probs, embeddings, attention_weights
-        else:
-            return log_probs, embeddings
-
+# GCNNet / GATNet live in gnnvis/models (shared with the app and the precompute
+# scripts); build_model() constructs any registered model by name.
 
 # --- Dataset Wrapper ---
 class PreprocessedDatasetWrapper:
@@ -210,8 +84,10 @@ def load_training_dataset(name, root_dir, processed_dir):
     processed_file_path = os.path.join(processed_dir, f"{name}_processed.pt")
     if os.path.exists(processed_file_path):
         try:
-            # Load with legacy pickle=False for compatibility, new PyTorch prefers weights_only
-            loaded_obj = torch.load(processed_file_path, map_location='cpu')
+            # The file holds a pickled PyG Data object written by preprocess_dataset.py
+            # (a trusted local file). PyTorch >= 2.6 defaults to weights_only=True,
+            # which rejects it and silently fell back to Planetoid.
+            loaded_obj = torch.load(processed_file_path, map_location='cpu', weights_only=False)
             print(f"    Loaded from pre-processed file: {processed_file_path}")
             return PreprocessedDatasetWrapper(loaded_obj)
         except Exception as e:
@@ -316,7 +192,7 @@ if __name__ == '__main__':
         
         # Prepare link prediction data if any model uses it
         link_data = None
-        if any(config.get('enable_link_prediction', False) for config in [GCN_CONFIG[dataset_name], GAT_CONFIG[dataset_name]]):
+        if any(MODEL_CONFIGS[m][dataset_name].get('enable_link_prediction', False) for m in MODELS_TO_TRAIN):
             print(f"  Preparing link prediction data...")
             link_data = create_edge_splits(data, val_ratio=0.05, test_ratio=0.15)
             print(f"    Train edges: {link_data['num_train_edges']}, Val edges: {link_data['num_val_edges']}, Test edges: {link_data['num_test_edges']}")
@@ -325,19 +201,13 @@ if __name__ == '__main__':
             print(f"\n  -- Training Model: {model_type} --")
             start_time = time.time()
             
-            config = (GCN_CONFIG if model_type == 'GCN' else GAT_CONFIG)[dataset_name]
+            config = MODEL_CONFIGS[model_type][dataset_name]
             model_params = {k: v for k, v in config.items() if k not in ['lr', 'weight_decay', 'link_pred_weight']}
 
-            if model_type == 'GCN':
-                model = GCNNet(in_channels=dataset.num_node_features,
-                               out_channels=dataset.num_classes,
-                               **model_params)
-            elif model_type == 'GAT':
-                model = GATNet(in_channels=dataset.num_node_features,
-                               out_channels=dataset.num_classes,
-                               **model_params)
-            else:
-                print(f"    ERROR: Model type '{model_type}' not recognized. Skipping.")
+            try:
+                model = build_model(model_type, dataset.num_node_features, dataset.num_classes, **model_params)
+            except ValueError as e:
+                print(f"    ERROR: {e}. Skipping.")
                 continue
 
             model = model.to(device)
@@ -415,9 +285,10 @@ if __name__ == '__main__':
 
             # 1. Pre-compute Predictions and Embeddings
             print("    1. Computing predictions and high-dimensional embeddings...")
-            if model_type == 'GAT':
+            has_attention = model_capabilities(model_type)['attention']
+            if has_attention:
                 log_probs, embeddings, attention_weights = model.inference(data, return_attention_weights=True)
-            else: # GCN
+            else:
                 log_probs, embeddings = model.inference(data)
             
             predictions = log_probs.argmax(dim=1)
@@ -455,8 +326,8 @@ if __name__ == '__main__':
             }
             
             # Add attention weights only for GAT models
-            if model_type == 'GAT':
-                print("    4. Storing GAT attention weights...")
+            if has_attention:
+                print("    4. Storing attention weights...")
                 # Deconstruct tuple and store on CPU
                 att1, att2 = attention_weights
                 save_package['attention_weights'] = {

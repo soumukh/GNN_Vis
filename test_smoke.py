@@ -7,7 +7,7 @@ import os
 import torch
 from torch_geometric.datasets import Planetoid
 
-from run_specific_cpa import instantiate_model, load_precomputed_package
+from gnnvis.models import load_package, load_model
 from app_stability import run_link_stability_analysis
 
 MODEL = 'GCN'
@@ -15,7 +15,7 @@ DATASET = 'Cora'
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
 
 print(f"Smoke test: model={MODEL}, dataset={DATASET}")
-package = load_precomputed_package(MODEL, DATASET)
+package = load_package(MODEL, DATASET)
 if not package:
     print('No package found; aborting smoke test')
     exit(1)
@@ -23,10 +23,7 @@ if not package:
 dataset = Planetoid(root=DATA_DIR, name=DATASET)
 data = dataset[0]
 
-model = instantiate_model(package, MODEL, dataset.num_node_features, dataset.num_classes)
-if not model:
-    print('Failed to instantiate model; aborting')
-    exit(1)
+model = load_model(package, MODEL, dataset.num_node_features, dataset.num_classes, device='cpu')
 
 with torch.no_grad():
     preds = model(data.x, data.edge_index).argmax(dim=1)

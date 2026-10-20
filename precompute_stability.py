@@ -16,11 +16,10 @@ import sys
 import time
 
 import torch
-import torch.nn.functional as F
-from torch_geometric.nn import GCNConv, GATConv
 from torch_geometric.data import Data
 from torch_geometric.datasets import Planetoid
-from torch_geometric.explain import Explainer, GNNExplainer
+
+from gnnvis.models import available_models, load_package, load_model, model_capabilities
 
 # ── Path setup ────────────────────────────────────────────────────────────────
 SCRIPT_DIR      = os.path.dirname(os.path.abspath(__file__))
@@ -31,77 +30,8 @@ os.makedirs(CACHE_DIR, exist_ok=True)
 
 device = torch.device('cpu')
 
-# ── Model definitions (must mirror app.py exactly) ──────────────────
-
-class GCNNet(torch.nn.Module):
-    def __init__(self, in_channels, hidden_channels, out_channels,
-                 dropout_rate=0.5, enable_link_prediction=False, **kwargs):
-        super().__init__()
-        self.conv1 = GCNConv(in_channels, hidden_channels)
-        self.conv2 = GCNConv(hidden_channels, out_channels)
-        self.dropout_rate = dropout_rate
-        self.enable_link_prediction = enable_link_prediction
-
-    def forward(self, x, edge_index, edge_weight=None, **kwargs):
-        x = F.relu(self.conv1(x, edge_index, edge_weight=edge_weight))
-        x = F.dropout(x, p=self.dropout_rate, training=self.training)
-        x = self.conv2(x, edge_index, edge_weight=edge_weight)
-        return F.log_softmax(x, dim=1)
-
-
-class GATNet(torch.nn.Module):
-    def __init__(self, in_channels, hidden_channels, out_channels,
-                 heads=8, dropout_rate=0.6, enable_link_prediction=False, **kwargs):
-        super().__init__()
-        self.conv1 = GATConv(in_channels, hidden_channels, heads=heads, dropout=dropout_rate)
-        self.conv2 = GATConv(hidden_channels * heads, out_channels, heads=1,
-                             concat=False, dropout=dropout_rate)
-        self.dropout_rate = dropout_rate
-        self.enable_link_prediction = enable_link_prediction
-
-    def forward(self, x, edge_index, **kwargs):
-        x = F.dropout(x, p=self.dropout_rate, training=self.training)
-        x = F.elu(self.conv1(x, edge_index))
-        x = F.dropout(x, p=self.dropout_rate, training=self.training)
-        x = self.conv2(x, edge_index)
-        return F.log_softmax(x, dim=1)
-
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-def load_package(model_type, dataset_name):
-    path = os.path.join(MODEL_DIR, f"{model_type}_{dataset_name}_tuned.pkl")
-    if not os.path.exists(path):
-        print(f"  [SKIP] Package not found: {path}")
-        return None
-    with open(path, 'rb') as f:
-        return pickle.load(f)
-
-
-def build_model(package, model_type, num_features, num_classes):
-    args = package.get('model_init_args', {})
-    if model_type == 'GCN':
-        model = GCNNet(in_channels=num_features, out_channels=num_classes, **args)
-    else:
-        model = GATNet(in_channels=num_features, out_channels=num_classes, **args)
-    sd = package.get('model_state_dict', {})
-    sd = {k: torch.tensor(v) if isinstance(v, list) else v for k, v in sd.items()}
-    model.load_state_dict(sd, strict=False)
-    model.eval()
-    return model
-
-
-def get_edge_mask(explanation):
-    for attr in ('edge_mask', '_edge_mask', 'edge_weight', '_edge_weight'):
-        val = getattr(explanation, attr, None)
-        if val is not None:
-            return val.detach().cpu().numpy()
-    if hasattr(explanation, 'to_dict'):
-        d = explanation.to_dict()
-        for k in ('edge_mask', 'edge_weight'):
-            if k in d and d[k] is not None:
-                return d[k].detach().cpu().numpy()
-    return None
+# Models come from gnnvis/models (the single definition shared with the app);
+# the stability computation itself lives in app_stability.py.
 
 
 def cache_key(dataset_name, model_type, sigma):
@@ -138,7 +68,9 @@ def sanitise(results):
 def main():
     parser = argparse.ArgumentParser(description="Precompute stability cache")
     parser.add_argument('--datasets', nargs='+', default=['Cora', 'CiteSeer'])
-    parser.add_argument('--models',   nargs='+', default=['GCN', 'GAT'])
+    parser.add_argument('--models',   nargs='+',
+                        default=[m for m in available_models() if model_capabilities(m)['stability']],
+                        help='Default: every registered model that supports stability analysis')
     parser.add_argument('--sigmas',   nargs='+', type=float, default=[0.01, 0.05, 0.1])
     parser.add_argument('--force',    action='store_true',
                         help='Recompute even if cache already exists')
@@ -156,12 +88,16 @@ def main():
 
         print(f"-- {dataset_name} / {model_type} / sigma={sigma}  (key={key})")
 
+        if not model_capabilities(model_type)['stability']:
+            print(f"  [SKIP] Stability analysis is not supported for {model_type}\n")
+            continue
+
         if os.path.exists(path) and not args.force:
             print(f"  Already cached — skipping. (use --force to recompute)\n")
             continue
 
         # Load package
-        package = load_package(model_type, dataset_name)
+        package = load_package(model_type, dataset_name, MODEL_DIR)
         if package is None:
             print()
             continue
@@ -176,7 +112,7 @@ def main():
 
         # Build model
         try:
-            model = build_model(package, model_type, data.num_features, ds.num_classes)
+            model = load_model(package, model_type, data.num_features, ds.num_classes, device=device)
         except Exception as e:
             print(f"  [SKIP] Failed to build model: {e}\n")
             continue

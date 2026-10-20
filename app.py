@@ -47,7 +47,6 @@ import torch
 
 import torch.nn.functional as F
 
-from torch_geometric.nn import GCNConv, GATConv
 
 from torch_geometric.data import Data
 
@@ -78,6 +77,8 @@ import sys
 import threading
 
 from link_prediction_utils import create_link_prediction_candidates, get_top_k_predictions, generate_negative_samples
+
+from gnnvis.models import load_package, load_model, available_models, model_capabilities
 
 from cpa_iv_link_prediction import run_cpa_iv_link
 
@@ -156,7 +157,7 @@ DEFAULT_MODEL = 'GCN'
 
 AVAILABLE_DATASETS = ['Cora', 'CiteSeer']
 
-AVAILABLE_MODELS = ['GCN', 'GAT']
+AVAILABLE_MODELS = available_models()   # every model registered in gnnvis/models
 
 # --- Plotly Express thread safety ---
 # Dash's dev server runs callbacks in parallel threads. Plotly Express reads
@@ -194,6 +195,12 @@ CLASS_PALETTE = px.colors.qualitative.Plotly
 # Colour-blind-safe pair for correct / incorrect (instead of green / red)
 CORRECT_COLOR = '#2166ac'
 INCORRECT_COLOR = '#e66101'
+
+
+def stability_unsupported_message(model_type):
+    supported = [m for m in available_models() if model_capabilities(m)['stability']]
+    return (f"⚠️ Stability analysis is not available for {model_type} models. "
+            f"Switch the model to {' or '.join(supported)} to run it.")
 
 
 def class_name(dataset_name, idx):
@@ -498,277 +505,24 @@ print(f"Using device: {device}")
 
 #print("Forced to use CPU for compatibility")
 
-# --- TASK: Model definitions ---
-# Purpose: define model classes used by the app (`GCNNet`, `GATNet`), including
-#          optional link-prediction heads and `predict_links()` helpers.
-# Inputs: tensor inputs `x`, `edge_index`; initialization arguments
-# Outputs: model instances compatible with `instantiate_model()`
-# Notes: Keep model code framework-agnostic where possible. If adding new models,
-#        add them here and update `instantiate_model()` accordingly.
-
-# --- Model Definitions ---
-
-class GCNNet(torch.nn.Module):
-
-    def __init__(self, in_channels, hidden_channels, out_channels, dropout_rate=0.5, enable_link_prediction=False, **kwargs):
-
-        super().__init__()
-
-        self.conv1 = GCNConv(in_channels, hidden_channels)
-
-        self.conv2 = GCNConv(hidden_channels, out_channels)
-
-        self.dropout_rate = dropout_rate
-
-        self.enable_link_prediction = enable_link_prediction
-
-        # Link prediction head
-
-        if enable_link_prediction:
-
-            self.link_predictor = torch.nn.Sequential(
-
-                torch.nn.Linear(hidden_channels * 2, hidden_channels),
-
-                torch.nn.ReLU(),
-
-                torch.nn.Dropout(dropout_rate),
-
-                torch.nn.Linear(hidden_channels, 1)
-
-            )
-
-    def forward(self, x, edge_index, edge_weight=None, return_embeddings=False, **kwargs):
-
-        x = F.relu(self.conv1(x, edge_index, edge_weight=edge_weight))
-
-        x = F.dropout(x, p=self.dropout_rate, training=self.training)
-
-        embeddings = x  
-
-        x = self.conv2(x, edge_index, edge_weight=edge_weight)
-
-        node_output = F.log_softmax(x, dim=1)
-
-        if return_embeddings:
-
-            return node_output, embeddings
-
-        return node_output
-
-    def predict_links(self, embeddings, edge_index):
-
-        """Predict link scores for given edge pairs."""
-
-        if not self.enable_link_prediction:
-
-            raise ValueError("Link prediction not enabled for this model")
-
-        # Get embeddings for source and target nodes
-
-        source_emb = embeddings[edge_index[0]]
-
-        target_emb = embeddings[edge_index[1]]
-
-        # Concatenate embeddings
-
-        edge_features = torch.cat([source_emb, target_emb], dim=1)
-
-        # Predict link scores
-
-        link_scores = self.link_predictor(edge_features)
-
-        return link_scores.squeeze()
-
-class GATNet(torch.nn.Module):
-
-    def __init__(self, in_channels, hidden_channels, out_channels, heads=8, dropout_rate=0.6, enable_link_prediction=False, **kwargs):
-
-        super().__init__()
-
-        self.conv1 = GATConv(in_channels, hidden_channels, heads=heads, dropout=dropout_rate)
-
-        self.conv2 = GATConv(hidden_channels * heads, out_channels, heads=1, concat=False, dropout=dropout_rate)
-
-        self.dropout_rate = dropout_rate
-
-        self.enable_link_prediction = enable_link_prediction
-
-        self.init_args = {'hidden_channels': hidden_channels, 'heads': heads, 'dropout_rate': dropout_rate, 'enable_link_prediction': enable_link_prediction, **kwargs}
-
-        # Link prediction head
-
-        if enable_link_prediction:
-
-            self.link_predictor = torch.nn.Sequential(
-
-                torch.nn.Linear(hidden_channels * heads * 2, hidden_channels * heads),
-
-                torch.nn.ReLU(),
-
-                torch.nn.Dropout(dropout_rate),
-
-                torch.nn.Linear(hidden_channels * heads, 1)
-
-            )
-
-    def forward(self, x, edge_index, return_embeddings=False):
-
-        x = F.dropout(x, p=self.dropout_rate, training=self.training)
-
-        x = F.elu(self.conv1(x, edge_index))
-
-        x = F.dropout(x, p=self.dropout_rate, training=self.training)
-
-        embeddings = x  # Capture embeddings for link prediction
-
-        x = self.conv2(x, edge_index)
-
-        node_output = F.log_softmax(x, dim=1)
-
-        if return_embeddings:
-
-            return node_output, embeddings
-
-        return node_output
-
-    def predict_links(self, embeddings, edge_index):
-
-        """Predict link scores for given edge pairs."""
-
-        if not self.enable_link_prediction:
-
-            raise ValueError("Link prediction not enabled for this model")
-
-        # Get embeddings for source and target nodes
-
-        source_emb = embeddings[edge_index[0]]
-
-        target_emb = embeddings[edge_index[1]]
-
-        # Concatenate embeddings
-
-        edge_features = torch.cat([source_emb, target_emb], dim=1)
-
-        # Predict link scores
-
-        link_scores = self.link_predictor(edge_features)
-
-        return link_scores.squeeze()
-
-# --- TASK: Data loading & model instantiation ---
-# Purpose: load precomputed model packages, convert saved state_dicts to tensors,
-#          instantiate model classes and move to `device`.
-# Inputs: `package` metadata, `model_type`, `num_features`, `num_classes`
-# Outputs: PyTorch `model` ready for inference
-# Notes: `package` is expected to be a dict with `model_state_dict` and init args.
-
-# --- Data Loading & Model Instantiation ---
+# --- TASK: Models ---
+# Model classes, the model registry and package loading live in gnnvis/models:
+# the single definition shared with train_models.py and the precompute
+# scripts. These wrappers keep the app's None-on-failure convention.
 
 def load_precomputed_package(model_type, dataset_name):
+    return load_package(model_type, dataset_name, MODEL_ABS_DIR)
 
-    filename = f"{model_type}_{dataset_name}_tuned.pkl"
-
-    path = os.path.join(MODEL_ABS_DIR, filename)
-
-    if not os.path.exists(path):
-
-        print(f"ERROR: Pre-computed file not found: {path}")
-
-        return None
-
-    try:
-
-        with open(path, 'rb') as f:
-
-            package = pickle.load(f)
-
-        return package
-
-    except Exception as e:
-
-        print(f"ERROR: Failed to load pre-computed file '{path}'. Error: {e}")
-
-        return None
 
 def instantiate_model(package, model_type, num_features, num_classes, verbose=False):
-
-    if not package: 
-
-        if verbose: print("ERROR: Package is None")
-
+    """The model saved in `package`, on `device` in eval mode; None on failure."""
+    if not package:
         return None
-
     try:
-
-        if verbose:
-
-            print(f"Instantiating {model_type} model with {num_features} features and {num_classes} classes...")
-
-            model_args = package.get('model_init_args', {})
-
-            print(f"Model args: {model_args}")
-
-        else:
-
-            model_args = package.get('model_init_args', {})
-
-        if model_type == 'GCN': 
-
-            model = GCNNet(in_channels=num_features, out_channels=num_classes, **model_args)
-
-        elif model_type == 'GAT':
-
-            model = GATNet(in_channels=num_features, out_channels=num_classes, **model_args)
-
-            if verbose:
-
-                print(f"GAT model created. enable_link_prediction={model.enable_link_prediction}")
-
-        else: 
-
-            raise ValueError(f"Unknown model type: {model_type}")
-
-        state_dict = package.get('model_state_dict', {})
-
-        if not state_dict:
-
-            if verbose: print("ERROR: model_state_dict is empty or missing")
-
-            return None
-
-        # Convert lists to tensors if needed
-
-        state_dict = {key: torch.tensor(value) if isinstance(value, list) else value 
-
-                     for key, value in state_dict.items()}
-
-        missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
-
-        if verbose and (missing_keys or unexpected_keys):
-
-            if missing_keys:
-
-                print(f"WARNING: Missing keys in state dict: {missing_keys}")
-
-            if unexpected_keys:
-
-                print(f"WARNING: Unexpected keys in state dict: {unexpected_keys}")
-
-        model.to(device)
-
-        model.eval()
-
-        return model
-
+        return load_model(package, model_type, num_features, num_classes, device=device)
     except Exception as e:
-
         print(f"ERROR: Could not instantiate {model_type} model. Error: {e}")
-
-        import traceback
-
         traceback.print_exc()
-
         return None
 
 # --- TASK: Explanation & Inference ---
@@ -3677,8 +3431,8 @@ def update_confusion_matrix_style(analysis_mode):
 def reset_stability_on_model_change(_dataset, model_type):
     """Stability results belong to one dataset/model: clear them on a switch so
     another model's plots are never shown under the new selection."""
-    if model_type == 'GAT':
-        return [], "⚠️ Stability analysis is only available for GCN models. Switch the model to GCN to run it."
+    if not model_capabilities(model_type)['stability']:
+        return [], stability_unsupported_message(model_type)
     return [], " "
 
 
@@ -5434,7 +5188,7 @@ def update_bottom_layer(selected_link, selected_node, explanation, cpa_data, lin
             causal_style = {'display': 'none'}
             if active_cpa_data:
                 causal_content = create_cpa_iv_panel(active_cpa_data, f"{u} \u2192 {v}")
-            if model_type == 'GAT':
+            if model_capabilities(model_type)['attention']:
                 attention_content = create_attention_panel(
                     get_attention_weights(package_meta),
                     f"{u} \u2192 {v}"
@@ -5586,7 +5340,7 @@ def update_bottom_layer(selected_link, selected_node, explanation, cpa_data, lin
             causal_style = {'display': 'none'}
             if cpa_data:
                 causal_content = create_cpa_iv_panel(cpa_data, target_node_idx)
-            if model_type == 'GAT':
+            if model_capabilities(model_type)['attention']:
                 attention_content = create_attention_panel(
                     get_attention_weights(package_meta),
                     target_node_idx if target_node_idx != -1 else 'selected node'
@@ -6804,8 +6558,8 @@ def run_stability_callback(n_clicks, sigma, sample_size,
 
     # Stability analysis is supported for GCN only; clear any earlier (GCN)
     # results so they are not shown under a GAT label.
-    if n_clicks and model_type == 'GAT':
-        return [], "⚠️ Stability analysis is only available for GCN models. Switch the model to GCN to run it."
+    if n_clicks and not model_capabilities(model_type)['stability']:
+        return [], stability_unsupported_message(model_type)
 
     if not n_clicks or not package or not dataset or not predictions_data:
         print("[STABILITY] Guard failed — missing data")
