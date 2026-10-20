@@ -4955,14 +4955,14 @@ def update_causal_layer3_status(status_data):
     Input('embedding-color-mode', 'value'),
     Input('selected-node-store', 'data'),
     Input('selected-link-store', 'data'),
+    Input('analysis-mode-store', 'data'),
     State('precomputed-package-store', 'data'),
     State('full-dataset-store', 'data'),
     State('layer3-tabs', 'value'),
-    State('analysis-mode-store', 'data'),
     State('link-prediction-store', 'data'),
     prevent_initial_call=True
 )
-def update_mid_layer(n_clicks, predictions_data, cpa_data, link_cpa_data, embedding_color_mode, selected_node, selected_link, package, dataset, active_layer3_tab, analysis_mode, link_prediction_store):
+def update_mid_layer(n_clicks, predictions_data, cpa_data, link_cpa_data, embedding_color_mode, selected_node, selected_link, analysis_mode, package, dataset, active_layer3_tab, link_prediction_store):
     try:
         empty_fig = empty_figure("Loading model…")
         gnn_style = {'flex': '0.8', 'minWidth': '260px', 'minHeight': '0', 'height': '100%', 'maxHeight': '100%',
@@ -5006,11 +5006,6 @@ def update_mid_layer(n_clicks, predictions_data, cpa_data, link_cpa_data, embedd
                 traceback.print_exc()
                 embeddings_fig = empty_figure("Could not draw embeddings - change colour mode to retry")
 
-        # If there are active link predictions, the subgraph evaluation
-        # callback is responsible for rendering the confusion matrix. Avoid
-        # overwriting that figure here when link predictions exist.
-        if link_prediction_store:
-            return embeddings_fig, no_update, gnn_style
 
         # In Link Prediction mode the confusion matrix is produced by the
         # subgraph/link-evaluation callback. Avoid overwriting that figure
@@ -5071,11 +5066,11 @@ def update_mid_layer(n_clicks, predictions_data, cpa_data, link_cpa_data, embedd
     Output('performance-metrics', 'style', allow_duplicate=True),
     Input('global-run-button', 'n_clicks'),
     Input('current-predictions-store', 'data'),
+    Input('analysis-mode-store', 'data'),
     State('full-dataset-store', 'data'),
-    State('analysis-mode-store', 'data'),
     prevent_initial_call=True,
 )
-def update_node_performance_metrics(run_clicks, predictions_data, dataset_meta, analysis_mode):
+def update_node_performance_metrics(run_clicks, predictions_data, analysis_mode, dataset_meta):
     try:
         # Node-classification metrics, shown as soon as predictions exist
         if analysis_mode != 'node_classification':
@@ -5644,22 +5639,36 @@ def update_link_list(link_predictions):
 
     Input('link-prediction-store', 'data'),
     Input('analysis-mode-store', 'data'),
-
-    State('precomputed-package-store', 'data'),
-
+    Input('precomputed-package-store', 'data'),
     State('full-dataset-store', 'data'),
-
     State('model-dropdown', 'value'),
-
     State('dataset-dropdown', 'value'),
-
     State('graph-type-store', 'data'),
-
     prevent_initial_call=True
-
 )
-@serialize_model_use
 def evaluate_subgraph_predictions(link_pred_data, analysis_mode, package, dataset, model_type, dataset_name, graph_type):
+    """Link-view confusion matrix. It is a global evaluation of the model on the
+    held-out edges (independent of the typed or selected link), so it is built
+    when Link view is entered or the model changes, and cached per
+    (model, dataset): RUN and link selections reuse it instantly instead of
+    waiting behind other model work."""
+    if not package or not dataset or analysis_mode != 'link_prediction':
+        return no_update, no_update, no_update, no_update, no_update, no_update, no_update
+    key = (model_type, dataset_name)
+    result = _LINK_EVAL_CACHE.get(key)
+    if result is None:
+        result = _evaluate_link_predictions(link_pred_data, analysis_mode, package, dataset,
+                                            model_type, dataset_name, graph_type)
+        if isinstance(result[0], str) and result[0].startswith('✅'):
+            _LINK_EVAL_CACHE[key] = result
+    return result
+
+
+_LINK_EVAL_CACHE = {}   # (model_type, dataset_name) -> evaluate_subgraph_predictions outputs
+
+
+@serialize_model_use
+def _evaluate_link_predictions(link_pred_data, analysis_mode, package, dataset, model_type, dataset_name, graph_type):
 
     """Evaluate edge predictions on subgraph and show confusion matrix."""
 
@@ -5671,8 +5680,7 @@ def evaluate_subgraph_predictions(link_pred_data, analysis_mode, package, datase
         except Exception:
             pass
 
-        if not link_pred_data or not package or not dataset or analysis_mode != 'link_prediction':
-
+        if not package or not dataset or analysis_mode != 'link_prediction':
             return no_update, no_update, no_update, no_update, no_update, no_update, no_update
 
         # Try to load subgraph model; GAT may reuse the same subgraph split as GCN
@@ -5750,40 +5758,44 @@ def evaluate_subgraph_predictions(link_pred_data, analysis_mode, package, datase
                         pred = 1
                     neg_data.append({'u': u_neg, 'v': v_neg, 'score': score, 'pred': pred, 'true': 0})
             else:
-                # Use model to score positives (removed edges)
-                removed_set = set((int(e[0]), int(e[1])) for e in removed_edges)
-                pos_data = []
-                for edge in removed_edges:
-                    u, v = int(edge[0]), int(edge[1])
-                    try:
-                        score = float(get_model_score(model, pyg_data.x, pyg_data.edge_index, u, v))
-                    except Exception:
-                        score = 0.0
-                    pred = 1 if score > 0.5 else 0
-                    pos_data.append({'u': u, 'v': v, 'score': score, 'pred': pred, 'true': 1})
-
-                # Sample negative pairs (non-edges) and score them
-                neg_data = []
-                num_negatives = len(removed_edges)
-                nnodes = int(dataset.get('num_nodes', max(1000, num_negatives * 2)))
-                sampled = set()
+                # Positives: the removed (held-out) edges.
+                positives = [(int(e[0]), int(e[1])) for e in removed_edges]
+                # Negatives: seeded (same every run) and never a real edge: they
+                # must avoid both the held-out edges and the edges in the graph.
                 import random
-                while len(neg_data) < num_negatives:
-                    u_neg = random.randint(0, nnodes - 1)
-                    v_neg = random.randint(0, nnodes - 1)
-                    if u_neg == v_neg:
+                rng = random.Random(0)
+                ei = pyg_data.edge_index.cpu().tolist()
+                real = {(min(a, b), max(a, b)) for a, b in zip(ei[0], ei[1])}
+                real |= {(min(a, b), max(a, b)) for a, b in positives}
+                nnodes = int(dataset.get('num_nodes', max(1000, len(positives) * 2)))
+                negatives, sampled = [], set()
+                while len(negatives) < len(positives):
+                    a, b = rng.randrange(nnodes), rng.randrange(nnodes)
+                    key = (min(a, b), max(a, b))
+                    if a == b or key in real or key in sampled:
                         continue
-                    if (u_neg, v_neg) in removed_set or (v_neg, u_neg) in removed_set:
-                        continue
-                    if (u_neg, v_neg) in sampled:
-                        continue
-                    sampled.add((u_neg, v_neg))
-                    try:
-                        score = float(get_model_score(model, pyg_data.x, pyg_data.edge_index, u_neg, v_neg))
-                    except Exception:
-                        score = 0.0
-                    pred = 1 if score > 0.5 else 0
-                    neg_data.append({'u': u_neg, 'v': v_neg, 'score': score, 'pred': pred, 'true': 0})
+                    sampled.add(key)
+                    negatives.append((a, b))
+
+                # Score every pair from ONE forward pass (was one full forward
+                # pass per pair: ~2100 passes, 11-12 s).
+                with torch.no_grad():
+                    _, emb = model(pyg_data.x, pyg_data.edge_index, return_embeddings=True)
+                    pairs = torch.tensor(positives + negatives, dtype=torch.long).t().to(emb.device)
+                    if getattr(model, 'enable_link_prediction', False):
+                        raw = model.predict_links(emb, pairs).reshape(-1)
+                    else:
+                        raw = (emb[pairs[0]] * emb[pairs[1]]).sum(dim=1)
+                    scores = torch.sigmoid(raw).cpu().tolist()
+                pos_data, neg_data = [], []
+                for (u, v), score in zip(positives + negatives, scores):
+                    rec = {'u': u, 'v': v, 'score': float(score), 'pred': 1 if score > 0.5 else 0}
+                    if len(pos_data) < len(positives):
+                        rec['true'] = 1
+                        pos_data.append(rec)
+                    else:
+                        rec['true'] = 0
+                        neg_data.append(rec)
 
             # Combine all data for metrics
 
