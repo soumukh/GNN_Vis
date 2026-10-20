@@ -25,7 +25,10 @@ Quick check after the offline phase: `python test_smoke.py`
   `components.py` (tiles, cards, placeholders) and `figures/` (embeddings, confusion
   matrices, subgraph, importance, CPA-IV, attention, full graph, stability): plain
   functions from data to Plotly figures / Dash components, testable without the app.
-- `app.py`: the Dash layout and callbacks; `app_stability.py`, `app_expl.py`,
+- `gnnvis/ui/layout/`: the page layout, one module per area (header, controls, overview,
+  explanation / full-graph / stability tabs, stores); `build_layout()` assembles it.
+- `gnnvis/config.py`: datasets, defaults and the model list (from the registry).
+- `app.py`: the Dash callbacks; `app_stability.py`, `app_expl.py`,
   `cpa_iv_link_prediction.py`, `link_prediction_utils.py`: analysis code.
 - `train_models.py`, `precompute_stability.py`, `precompute_link_stability.py`: offline scripts.
 - `tests/`: `python -m pytest` (a few seconds; synthetic graphs, plus checks on the saved
