@@ -7,7 +7,7 @@ from dash import no_update
 from gnnvis.ui.components import (cell_details_placeholder, confusion_matrix_style, explanation_cards,
                                   metric_tiles, stability_unsupported_message, subgraph_color_key)
 from gnnvis.ui.figures.confusion import link_confusion_figure, node_confusion_figure
-from gnnvis.ui.figures.embeddings import plot_embeddings
+from gnnvis.ui.figures.embeddings import get_2d_embeddings, plot_embeddings
 from gnnvis.ui.figures.full_graph import build_full_graph_figure
 from gnnvis.ui.figures.importance import get_one_hop_neighbors, plot_feature_importance, plot_neighbor_importance
 from gnnvis.ui.figures.stability import build_stability_plots
@@ -112,6 +112,18 @@ def test_embedding_confidence_mode_and_fallback(emb_inputs):
     # no confidences available -> falls back to the class colouring
     fig = plot_embeddings(emb, preds, y, None, class_color_map(3), 3, dataset_name='Cora', color_mode='confidence')
     assert 'true class' in fig.layout.title.text
+
+
+def test_embedding_projection_choice_and_fallback(emb_inputs):
+    emb, preds, y, conf = emb_inputs
+    package = {'embeddings_2d': {'umap': emb.tolist(), 'tsne': (emb * 2).tolist(), 'pca': None}}
+    arr, used = get_2d_embeddings(package, 'tsne', return_method=True)
+    assert used == 'tsne' and np.allclose(arr, emb * 2)
+    # missing projection -> falls back to another precomputed one
+    assert get_2d_embeddings(package, 'pca', return_method=True)[1] == 'umap'
+    assert np.allclose(get_2d_embeddings(package), emb)          # default unchanged: UMAP
+    fig = plot_embeddings(emb, preds, y, None, class_color_map(3), 3, dataset_name='Cora', projection='tsne')
+    assert fig.layout.title.text.startswith('Node embeddings, t-SNE')
 
 
 # ── importance ────────────────────────────────────────────────────────────────

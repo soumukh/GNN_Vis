@@ -8,40 +8,50 @@ from sklearn.decomposition import PCA
 from gnnvis.ui.theme import CORRECT_COLOR, INCORRECT_COLOR, class_label, empty_figure
 
 
-def get_2d_embeddings(package):
+# 2-D projections that train_models.py stores in each package ('embeddings_2d')
+EMBEDDING_PROJECTIONS = {'umap': 'UMAP', 'tsne': 't-SNE', 'pca': 'PCA'}
+DEFAULT_PROJECTION = 'umap'
+
+
+def get_2d_embeddings(package, method=None, return_method=False):
     """Return a 2D embedding projection from the loaded package.
 
     Priority:
-      1. precomputed UMAP
-      2. precomputed PCA/TSNE
+      1. the requested precomputed projection (``method``: 'umap', 'tsne', 'pca')
+      2. any other precomputed one (UMAP, then PCA, then t-SNE)
       3. fallback PCA from raw high-dimensional embeddings
+    With return_method=True, returns (array, method actually used).
     """
+    def result(arr, used):
+        return (arr, used) if return_method else arr
+
     if not package:
-        return None
+        return result(None, None)
 
     embed2d = package.get('embeddings_2d', {})
-    for method in ('umap', 'pca', 'tsne'):
-        if method in embed2d and embed2d[method] is not None:
+    order = ([method] if method else []) + [m for m in ('umap', 'pca', 'tsne') if m != method]
+    for m in order:
+        if m in embed2d and embed2d[m] is not None:
             try:
-                arr = np.array(embed2d[method])
+                arr = np.array(embed2d[m])
                 if arr.ndim == 2 and arr.shape[1] == 2:
-                    return arr
+                    return result(arr, m)
             except Exception:
                 pass
 
     raw_embeddings = package.get('embeddings')
     if raw_embeddings is None:
-        return None
+        return result(None, None)
 
     try:
         raw_arr = np.array(raw_embeddings)
         if raw_arr.ndim == 2 and raw_arr.shape[1] >= 2:
             pca = PCA(n_components=2)
-            return pca.fit_transform(raw_arr)
+            return result(pca.fit_transform(raw_arr), 'pca')
     except Exception as e:
         print(f"[EMBEDDINGS] Failed to compute fallback PCA projection: {e}")
 
-    return None
+    return result(None, None)
 
 
 EMBEDDING_COLOR_TITLES = {
@@ -51,7 +61,8 @@ EMBEDDING_COLOR_TITLES = {
 
 
 def plot_embeddings(embeddings_2d, predictions, true_labels, selected_node_id, class_to_color_map, num_classes,
-                    target_node_id=None, dataset_name=None, color_mode='actual', confidences=None):
+                    target_node_id=None, dataset_name=None, color_mode='actual', confidences=None,
+                    projection=None):
 
     if embeddings_2d is None: return empty_figure("Embeddings not available")
 
@@ -157,7 +168,8 @@ def plot_embeddings(embeddings_2d, predictions, true_labels, selected_node_id, c
 
         title={
 
-            'text': f"Node embeddings (colour = {EMBEDDING_COLOR_TITLES.get(color_mode, 'true class')})",
+            'text': (f"Node embeddings{', ' + EMBEDDING_PROJECTIONS[projection] if projection in EMBEDDING_PROJECTIONS else ''}"
+                     f" (colour = {EMBEDDING_COLOR_TITLES.get(color_mode, 'true class')})"),
 
             'font': {'size': 13},
 

@@ -210,6 +210,11 @@ body {
     letter-spacing: 0.3px;
 }
 .hint { font-size: 11px; color: var(--muted); cursor: help; }
+.projection-dropdown { width: 92px; font-size: 12px; }
+.projection-dropdown .Select-control { height: 26px; }
+.projection-dropdown .Select-placeholder,
+.projection-dropdown .Select-value { line-height: 24px !important; }
+.projection-dropdown .Select-input { height: 24px; }
 .segmented { display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
 .segmented label {
     display: inline-flex !important;

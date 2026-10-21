@@ -46,13 +46,14 @@ def update_confusion_matrix_style(analysis_mode):
     Input(ids.SELECTED_NODE_STORE, 'data'),
     Input(ids.SELECTED_LINK_STORE, 'data'),
     Input(ids.ANALYSIS_MODE_STORE, 'data'),
+    Input(ids.EMBEDDING_PROJECTION, 'value'),
     State(ids.PRECOMPUTED_PACKAGE_STORE, 'data'),
     State(ids.FULL_DATASET_STORE, 'data'),
     State(ids.LAYER3_TABS, 'value'),
     State(ids.LINK_PREDICTION_STORE, 'data'),
     prevent_initial_call=True
 )
-def update_mid_layer(n_clicks, predictions_data, cpa_data, link_cpa_data, embedding_color_mode, selected_node, selected_link, analysis_mode, package, dataset, active_layer3_tab, link_prediction_store):
+def update_mid_layer(n_clicks, predictions_data, cpa_data, link_cpa_data, embedding_color_mode, selected_node, selected_link, analysis_mode, projection, package, dataset, active_layer3_tab, link_prediction_store):
     try:
         empty_fig = empty_figure("Loading model…")
         gnn_style = {'flex': '0.8', 'minWidth': '260px', 'minHeight': '0', 'height': '100%', 'maxHeight': '100%',
@@ -82,7 +83,7 @@ def update_mid_layer(n_clicks, predictions_data, cpa_data, link_cpa_data, embedd
             if selected_link.get('source') is not None:
                 selected_node_id_str = str(selected_link['source'])
 
-        embeddings_2d = get_2d_embeddings(package)
+        embeddings_2d, projection = get_2d_embeddings(package, projection, return_method=True)
         if embeddings_2d is None:
             embeddings_fig = empty_figure("Embeddings not available")
         else:
@@ -90,7 +91,8 @@ def update_mid_layer(n_clicks, predictions_data, cpa_data, link_cpa_data, embedd
                 embeddings_fig = plot_embeddings(np.array(embeddings_2d), preds, true_labels, selected_node_id_str, class_to_color_map, num_classes,
                                                  target_node_id=target_node_id_str, dataset_name=dataset_name,
                                                  color_mode=embedding_color_mode or 'actual',
-                                                 confidences=predictions_data.get('confidences'))
+                                                 confidences=predictions_data.get('confidences'),
+                                                 projection=projection)
             except Exception:
                 # Keep going: a failed embedding plot must not blank the confusion matrix
                 traceback.print_exc()

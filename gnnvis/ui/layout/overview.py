@@ -4,6 +4,7 @@ from dash import html, dcc
 
 from gnnvis.ui.components import cell_details_placeholder, confusion_matrix_style
 from gnnvis.ui import ids
+from gnnvis.ui.figures.embeddings import DEFAULT_PROJECTION, EMBEDDING_PROJECTIONS
 from gnnvis.tasks import DEFAULT_TASK
 
 
@@ -60,6 +61,16 @@ def overview():
                                 value='actual',
                                 inline=True,
                                 className='segmented',
+                            ),
+                            html.Span("Projection", className='control-label', style={'marginLeft': 'auto'},
+                                      title="2-D projection of the model's node embeddings (computed in training)"),
+                            dcc.Dropdown(
+                                id=ids.EMBEDDING_PROJECTION,
+                                options=[{'label': v, 'value': k} for k, v in EMBEDDING_PROJECTIONS.items()],
+                                value=DEFAULT_PROJECTION,
+                                clearable=False,
+                                searchable=False,
+                                className='projection-dropdown',
                             ),
                         ]),
                         dcc.Graph(
